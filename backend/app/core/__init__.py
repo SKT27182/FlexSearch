@@ -1,0 +1,1 @@
+"""FlexSearch Backend - Core module."""
