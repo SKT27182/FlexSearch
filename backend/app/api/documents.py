@@ -4,7 +4,6 @@ FlexSearch Backend - Documents API Router
 Document upload and management endpoints.
 """
 
-import logging
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
@@ -20,8 +19,9 @@ from app.schemas.document import (
     DocumentResponse,
     DocumentUploadResponse,
 )
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
 
@@ -52,7 +52,7 @@ async def verify_project_access(
 
 @router.post(
     "/upload",
-    response_model=DocumentUploadResponse,
+    response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_document(
@@ -60,7 +60,7 @@ async def upload_document(
     file: Annotated[UploadFile, File(...)],
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> DocumentUploadResponse:
+) -> DocumentResponse:
     """
     Upload a document to a project.
 
@@ -105,20 +105,54 @@ async def upload_document(
     await db.commit()
     await db.refresh(document)
 
-    # TODO: Upload to MinIO and trigger processing pipeline
-    # This will be implemented in the services layer
+    try:
+        # Upload to MinIO
+        from app.services.storage import get_storage_service
 
-    logger.info(f"Document uploaded: {file.filename} to project {project_id}")
+        storage = get_storage_service()
+        storage.upload_file(
+            path=storage_path,
+            data=content,
+            content_type=file.content_type or "application/octet-stream",
+        )
 
-    return DocumentUploadResponse(
-        id=document.id,
-        filename=document.filename,
-        status=document.status.value,
-        message="Document uploaded successfully. Processing will begin shortly.",
-    )
+        # Trigger RAG ingestion pipeline
+        from app.rag.pipeline import get_rag_pipeline
+
+        rag_pipeline = get_rag_pipeline()
+        chunk_count = await rag_pipeline.ingest_document(
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
+            filename=file.filename or "untitled",
+            document_id=str(document.id),
+            project_id=str(project_id),
+        )
+
+        # Update document status to COMPLETED
+        document.status = DocumentStatus.COMPLETED
+        document.chunk_count = chunk_count
+        document.processed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(document)
+
+        logger.info(
+            f"Document processed: {file.filename} ({chunk_count} chunks) "
+            f"to project {project_id}"
+        )
+
+    except Exception as e:
+        # Update status to FAILED on error
+        logger.error(f"Failed to process document {file.filename}: {e}")
+        document.status = DocumentStatus.FAILED
+        document.error_message = str(e)
+        await db.commit()
+        await db.refresh(document)
+        # Don't raise - return document with FAILED status
+
+    return document
 
 
-@router.get("/", response_model=DocumentListResponse)
+@router.get("", response_model=DocumentListResponse)
 async def list_documents(
     project_id: UUID,
     current_user: Annotated[User, Depends(get_current_active_user)],
@@ -204,8 +238,30 @@ async def delete_document(
             detail="Document not found",
         )
 
-    # TODO: Delete from MinIO and Qdrant
+    # Delete from MinIO
+    try:
+        from app.services.storage import get_storage_service
 
+        storage = get_storage_service()
+        if storage.file_exists(document.storage_path):
+            storage.delete_file(document.storage_path)
+            logger.info(f"Deleted file from MinIO: {document.storage_path}")
+    except Exception as e:
+        logger.error(f"Failed to delete file from MinIO: {e}")
+        # Continue with deletion even if MinIO fails
+
+    # Delete from Qdrant
+    try:
+        from app.rag.pipeline import get_rag_pipeline
+
+        rag_pipeline = get_rag_pipeline()
+        rag_pipeline.delete_document_data(str(document.id))
+        logger.info(f"Deleted vectors from Qdrant for document: {document.id}")
+    except Exception as e:
+        logger.error(f"Failed to delete vectors from Qdrant: {e}")
+        # Continue with deletion even if Qdrant fails
+
+    # Delete from database
     await db.delete(document)
     await db.commit()
 

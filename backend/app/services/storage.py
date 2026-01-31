@@ -4,7 +4,6 @@ FlexSearch Backend - Object Storage Service
 MinIO/S3-compatible storage abstraction.
 """
 
-import logging
 from io import BytesIO
 from typing import BinaryIO
 
@@ -12,8 +11,9 @@ from minio import Minio
 from minio.error import S3Error
 
 from app.core.config import settings
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class StorageService:

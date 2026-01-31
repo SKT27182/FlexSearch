@@ -4,7 +4,6 @@ FlexSearch Backend - Token Tracker Service
 Track and persist LLM token usage.
 """
 
-import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -12,8 +11,9 @@ from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import TokenUsage
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class TokenTracker:

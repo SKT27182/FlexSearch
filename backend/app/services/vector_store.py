@@ -4,7 +4,6 @@ FlexSearch Backend - Vector Store Service
 Qdrant vector database abstraction.
 """
 
-import logging
 from typing import Any
 from uuid import UUID
 
@@ -13,8 +12,9 @@ from qdrant_client.http import models as qdrant_models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.config import settings
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 # Default collection name
 COLLECTION_NAME = "flexsearch_chunks"
@@ -108,9 +108,9 @@ class VectorStoreService:
         Returns:
             List of search results with payload and score
         """
-        results = self._client.search(
+        results = self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
@@ -129,7 +129,7 @@ class VectorStoreService:
                 "score": result.score,
                 "payload": result.payload,
             }
-            for result in results
+            for result in results.points
         ]
 
     def search_with_filter(
@@ -147,9 +147,9 @@ class VectorStoreService:
             for key, value in filters.items()
         ]
 
-        results = self._client.search(
+        results = self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=qdrant_models.Filter(must=conditions),
             limit=top_k,
         )
@@ -160,7 +160,7 @@ class VectorStoreService:
                 "score": result.score,
                 "payload": result.payload,
             }
-            for result in results
+            for result in results.points
         ]
 
     def delete_by_project(self, project_id: str) -> None:

@@ -4,12 +4,12 @@ FlexSearch Backend - Fixed Window Chunking Strategy
 Simple fixed-size chunking with configurable overlap.
 """
 
-import logging
 from typing import Any
 
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class FixedWindowChunking(BaseChunkingStrategy):

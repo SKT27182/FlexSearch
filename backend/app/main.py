@@ -5,24 +5,22 @@ Main entry point for the RAG platform API.
 """
 
 import logging
+import signal
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.utils.logger import create_logger
+
 from app.api import admin, analytics, auth, chat, documents, projects, sessions
 from app.core.config import settings
 from app.db.postgres import close_db, init_db
 from app.db.redis import close_redis
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 @asynccontextmanager
@@ -40,6 +38,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Cleanup complete")
 
 
+def setup_signal_handlers():
+    """Setup signal handlers for graceful shutdown."""
+
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+
+# Setup signal handlers
+setup_signal_handlers()
+
+
 # Create FastAPI app
 app = FastAPI(
     title="FlexSearch RAG Platform",
@@ -51,7 +64,12 @@ app = FastAPI(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Configure for production
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

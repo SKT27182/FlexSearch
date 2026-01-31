@@ -5,7 +5,6 @@ Tesseract-based OCR for text extraction from PDFs and images.
 """
 
 import io
-import logging
 from typing import Any
 
 import pytesseract
@@ -14,8 +13,9 @@ from PIL import Image
 from pypdf import PdfReader
 
 from app.rag.ingestion.base import BaseExtractionStrategy, ExtractedContent
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class OCRExtractionStrategy(BaseExtractionStrategy):

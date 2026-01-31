@@ -5,7 +5,6 @@ Session management endpoints.
 """
 
 import json
-import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -18,8 +17,9 @@ from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Project, User
 from app.db.redis import RedisSessionStore, get_redis
 from app.schemas.session import SessionCreate, SessionListResponse, SessionResponse
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -35,7 +35,7 @@ async def get_session_store() -> RedisSessionStore:
     return RedisSessionStore(redis)
 
 
-@router.post("/", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     session_data: SessionCreate,
     current_user: Annotated[User, Depends(get_current_active_user)],
@@ -100,7 +100,7 @@ async def create_session(
     )
 
 
-@router.get("/", response_model=SessionListResponse)
+@router.get("", response_model=SessionListResponse)
 async def list_sessions(
     current_user: Annotated[User, Depends(get_current_active_user)],
     limit: int = 50,
@@ -131,6 +131,73 @@ async def list_sessions(
                     updated_at=datetime.fromisoformat(info["updated_at"]),
                 )
             )
+
+    return SessionListResponse(sessions=sessions, total=len(sessions))
+
+
+@router.get("/project/{project_id}", response_model=SessionListResponse)
+async def list_sessions_by_project(
+    project_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 50,
+) -> SessionListResponse:
+    """List all sessions for a specific project."""
+    # Verify project access
+    from uuid import UUID
+
+    try:
+        project_uuid = UUID(project_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid project ID format",
+        )
+
+    result = await db.execute(select(Project).where(Project.id == project_uuid))
+    project = result.scalar_one_or_none()
+
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+
+    if project.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this project",
+        )
+
+    store = await get_session_store()
+
+    # Get all user sessions and filter by project
+    session_ids = await store.zrange(
+        USER_SESSIONS_KEY.format(user_id=str(current_user.id)),
+        0,
+        -1,  # Get all sessions
+        desc=True,
+    )
+
+    sessions = []
+    for session_id in session_ids:
+        session_data = await store.get(SESSION_KEY.format(session_id=session_id))
+        if session_data:
+            info = json.loads(session_data)
+            # Filter by project_id
+            if info.get("project_id") == project_id:
+                sessions.append(
+                    SessionResponse(
+                        id=info["id"],
+                        project_id=info["project_id"],
+                        user_id=info["user_id"],
+                        title=info.get("title"),
+                        created_at=datetime.fromisoformat(info["created_at"]),
+                        updated_at=datetime.fromisoformat(info["updated_at"]),
+                    )
+                )
+                if len(sessions) >= limit:
+                    break
 
     return SessionListResponse(sessions=sessions, total=len(sessions))
 

@@ -4,7 +4,6 @@ FlexSearch Backend - Hybrid Retrieval Strategy
 Combined dense vector and BM25 sparse retrieval with RRF fusion.
 """
 
-import logging
 import math
 import re
 from collections import Counter
@@ -14,8 +13,9 @@ from app.rag.embedding import get_embedding_service
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.rag.retrieval.dense import DenseRetrieval
 from app.services.vector_store import get_vector_store
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class BM25:

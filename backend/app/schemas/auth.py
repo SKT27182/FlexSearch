@@ -4,6 +4,8 @@ FlexSearch Backend - Auth Schemas
 Pydantic models for authentication endpoints.
 """
 
+from uuid import UUID
+from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -39,10 +41,10 @@ class TokenPayload(BaseModel):
 class UserResponse(BaseModel):
     """User response model."""
 
-    id: str
-    email: str
+    id: UUID
+    email: EmailStr
     role: str
-    created_at: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

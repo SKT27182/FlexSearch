@@ -4,7 +4,6 @@ FlexSearch Backend - Admin API Router
 Admin-only endpoints for user management, file management, and system overview.
 """
 
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
@@ -20,8 +19,9 @@ from app.db.models import Document, DocumentStatus, Project, TokenUsage, User, U
 from app.schemas.auth import UserResponse
 from app.services.storage import get_storage_service
 from app.services.vector_store import get_vector_store
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 

@@ -4,13 +4,13 @@ FlexSearch Backend - Recursive Chunking Strategy
 Structure-aware recursive text splitting.
 """
 
-import logging
 import re
 from typing import Any
 
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class RecursiveChunking(BaseChunkingStrategy):

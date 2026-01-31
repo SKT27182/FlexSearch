@@ -4,14 +4,14 @@ FlexSearch Backend - Redis Connection
 Redis client for session and conversation state.
 """
 
-import logging
 from typing import Any
 
 import redis.asyncio as redis
 
 from app.core.config import settings
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 # Redis connection pool
 _redis_pool: redis.Redis | None = None

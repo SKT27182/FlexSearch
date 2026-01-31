@@ -4,7 +4,6 @@ FlexSearch Backend - Semantic Chunking Strategy
 Embedding-based semantic text splitting.
 """
 
-import logging
 from typing import Any
 
 import numpy as np
@@ -12,8 +11,9 @@ from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class SemanticChunking(BaseChunkingStrategy):

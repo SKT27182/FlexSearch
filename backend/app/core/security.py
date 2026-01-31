@@ -4,7 +4,6 @@ FlexSearch Backend - Security utilities
 Password hashing and JWT token management.
 """
 
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,8 +11,9 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from app.core.config import settings
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -21,12 +21,15 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    # bcrypt has a 72-byte limit, so we truncate to match what was hashed
+    return pwd_context.verify(plain_password[:72], hashed_password)
 
 
 def get_password_hash(password: str) -> str:
     """Hash a password."""
-    return pwd_context.hash(password)
+    # bcrypt has a 72-byte limit, truncate to avoid errors
+    logger.debug(f"Password length: {len(password)}, type: {type(password)}")
+    return pwd_context.hash(password[:72])
 
 
 def create_access_token(

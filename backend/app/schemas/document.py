@@ -7,7 +7,7 @@ Pydantic models for document endpoints.
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DocumentResponse(BaseModel):
@@ -17,7 +17,7 @@ class DocumentResponse(BaseModel):
     project_id: UUID
     filename: str
     content_type: str
-    file_size: int
+    file_size: int = Field(..., serialization_alias="size_bytes")
     status: str
     error_message: str | None
     chunk_count: int

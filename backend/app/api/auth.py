@@ -4,7 +4,6 @@ FlexSearch Backend - Auth API Router
 Authentication endpoints: register, login, refresh, me.
 """
 
-import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,8 +15,9 @@ from app.core.dependencies import get_current_active_user, get_db
 from app.core.security import create_access_token, get_password_hash, verify_password
 from app.db.models import User, UserRole
 from app.schemas.auth import Token, UserRegister, UserResponse
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

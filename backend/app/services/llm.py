@@ -4,7 +4,6 @@ FlexSearch Backend - LLM Service
 LiteLLM-based LLM provider abstraction.
 """
 
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
@@ -13,8 +12,9 @@ import litellm
 from litellm import acompletion
 
 from app.core.config import settings
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 # Configure LiteLLM
 litellm.set_verbose = settings.debug

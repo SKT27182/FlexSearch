@@ -5,9 +5,10 @@ Real-time chat with RAG pipeline integration and context management.
 """
 
 import json
-import logging
+import time
 from datetime import datetime, timezone
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import select
@@ -22,8 +23,9 @@ from app.rag.pipeline import get_rag_pipeline
 from app.schemas.session import ChatMessage
 from app.services.llm import get_llm_service
 from app.services.token_tracker import track_usage
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -188,7 +190,14 @@ async def chat_websocket(
         await websocket.close()
         return
 
-    project_id = session_info["project_id"]
+    # Convert project_id from string to UUID for database query
+    try:
+        project_id = UUID(session_info["project_id"])
+    except (ValueError, KeyError) as e:
+        logger.error(f"Invalid project_id in session {session_id}: {e}")
+        await websocket.send_json({"type": "error", "content": "Invalid session data"})
+        await websocket.close()
+        return
 
     # Verify project exists
     result = await db.execute(select(Project).where(Project.id == project_id))
@@ -226,6 +235,9 @@ async def chat_websocket(
             await websocket.send_json({"type": "start"})
 
             try:
+                # Start latency tracking
+                start_time = time.perf_counter()
+
                 # Get conversation context
                 context_messages_list = await get_conversation_context(
                     store, session_id, n_context
@@ -276,6 +288,10 @@ Retrieved Context:
                         input_tokens = chunk.input_tokens or 0
                         output_tokens = chunk.output_tokens or 0
 
+                # Calculate latency in milliseconds
+                end_time = time.perf_counter()
+                latency_ms = int((end_time - start_time) * 1000)
+
                 # Store assistant message in Redis
                 assistant_msg = ChatMessage(role="assistant", content=full_response)
                 await store.rpush(
@@ -293,7 +309,7 @@ Retrieved Context:
                     provider=llm_service.provider,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    latency_ms=0,  # TODO: Track actual latency
+                    latency_ms=latency_ms,
                 )
 
                 # Update session timestamp

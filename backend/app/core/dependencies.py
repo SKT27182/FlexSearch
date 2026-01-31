@@ -4,7 +4,6 @@ FlexSearch Backend - FastAPI Dependencies
 Reusable dependencies for authentication, database sessions, etc.
 """
 
-import logging
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -14,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import decode_access_token
 from app.db.postgres import get_session
 from app.db.models import User
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 

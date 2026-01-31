@@ -4,7 +4,7 @@ FlexSearch Backend - PostgreSQL Connection
 Async SQLAlchemy engine and session management.
 """
 
-import logging
+from app.utils.logger import create_logger
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -16,7 +16,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 # Create async engine
 engine = create_async_engine(

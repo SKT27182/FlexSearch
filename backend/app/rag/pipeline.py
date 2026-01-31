@@ -4,9 +4,8 @@ FlexSearch Backend - RAG Pipeline
 Main orchestrator for the RAG workflow.
 """
 
-import logging
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5, NAMESPACE_DNS
 
 from app.core.config import settings
 from app.rag.chunking import (
@@ -37,8 +36,9 @@ from app.rag.retrieval import (
     RetrievalResult,
 )
 from app.services.vector_store import get_vector_store
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class RAGPipeline:
@@ -149,7 +149,12 @@ class RAGPipeline:
         embeddings = self._embedding.embed_batch(chunk_texts)
 
         # Prepare for vector store
-        ids = [f"{document_id}_{chunk.chunk_index}" for chunk in chunks]
+        # Generate deterministic UUIDs for each chunk using UUID5
+        # This ensures Qdrant compatibility (requires UUID or int, not string)
+        ids = [
+            str(uuid5(NAMESPACE_DNS, f"{document_id}_{chunk.chunk_index}"))
+            for chunk in chunks
+        ]
         payloads = [
             {
                 "content": chunk.content,
@@ -236,7 +241,12 @@ class RAGPipeline:
             "context": "\n\n".join(r.content for r in results),
             "chunks": context_chunks,
             "sources": [
-                {"filename": r.metadata.get("filename", ""), "score": r.score}
+                {
+                    "filename": r.metadata.get("filename", ""),
+                    "chunk_index": r.metadata.get("chunk_index", 0),
+                    "content": r.content,
+                    "score": r.score,
+                }
                 for r in results
             ],
         }

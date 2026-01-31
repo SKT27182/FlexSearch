@@ -4,7 +4,6 @@ FlexSearch Backend - Analytics API Router
 Token usage analytics and reporting endpoints.
 """
 
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
@@ -22,8 +21,9 @@ from app.schemas.analytics import (
     UsageSummary,
     UserUsageSummary,
 )
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 

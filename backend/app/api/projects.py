@@ -4,7 +4,6 @@ FlexSearch Backend - Projects API Router
 Project CRUD endpoints.
 """
 
-import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -20,13 +19,14 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectUpdate,
 )
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
-@router.post("/", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     project_data: ProjectCreate,
     current_user: Annotated[User, Depends(get_current_active_user)],
@@ -48,7 +48,7 @@ async def create_project(
     return project
 
 
-@router.get("/", response_model=ProjectListResponse)
+@router.get("", response_model=ProjectListResponse)
 async def list_projects(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],

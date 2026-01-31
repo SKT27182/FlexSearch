@@ -4,13 +4,13 @@ FlexSearch Backend - Local Embedding Service
 Local embedding generation using sentence-transformers.
 """
 
-import logging
+from app.utils.logger import create_logger
 
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__)
 
 
 class LocalEmbedding:
