@@ -1,11 +1,9 @@
 import { create } from 'zustand';
-import { projectsApi, sessionsApi, type Project, type Session } from '@/lib/api';
+import { projectsApi, type Project } from '@/lib/api';
 
 interface ProjectState {
   projects: Project[];
   currentProject: Project | null;
-  sessions: Session[];
-  currentSession: Session | null;
   isLoading: boolean;
 
   // Actions
@@ -14,20 +12,13 @@ interface ProjectState {
   createProject: (name: string, description?: string) => Promise<Project>;
   deleteProject: (id: string) => Promise<void>;
   
-  fetchSessions: (projectId: string) => Promise<void>;
-  selectSession: (session: Session | null) => void;
-  createSession: (name: string, projectId: string) => Promise<Session>;
-  deleteSession: (id: string) => Promise<void>;
-  
   // Reset all state
   reset: () => void;
 }
 
-export const useProjectStore = create<ProjectState>()((set, get) => ({
+export const useProjectStore = create<ProjectState>()((set) => ({
   projects: [],
   currentProject: null,
-  sessions: [],
-  currentSession: null,
   isLoading: false,
 
   fetchProjects: async () => {
@@ -41,10 +32,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
   },
 
   selectProject: (project) => {
-    set({ currentProject: project, currentSession: null, sessions: [] });
-    if (project) {
-      get().fetchSessions(project.id);
-    }
+    set({ currentProject: project });
   },
 
   createProject: async (name, description) => {
@@ -61,40 +49,10 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     }));
   },
 
-  fetchSessions: async (projectId) => {
-    set({ isLoading: true });
-    try {
-      const sessions = await sessionsApi.list(projectId);
-      set({ sessions });
-    } finally {
-      set({ isLoading: false });
-    }
-  },
-
-  selectSession: (session) => {
-    set({ currentSession: session });
-  },
-
-  createSession: async (name, projectId) => {
-    const session = await sessionsApi.create({ name, project_id: projectId });
-    set((state) => ({ sessions: [session, ...state.sessions] }));
-    return session;
-  },
-
-  deleteSession: async (id) => {
-    await sessionsApi.delete(id);
-    set((state) => ({
-      sessions: state.sessions.filter((s) => s.id !== id),
-      currentSession: state.currentSession?.id === id ? null : state.currentSession,
-    }));
-  },
-
   reset: () => {
     set({
       projects: [],
       currentProject: null,
-      sessions: [],
-      currentSession: null,
       isLoading: false,
     });
   },

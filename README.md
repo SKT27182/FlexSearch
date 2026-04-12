@@ -1,13 +1,13 @@
 # FlexSearch
 
-A high-performance, local-first RAG (Retrieval-Augmented Generation) platform with project-centric knowledge management.
+A high-performance, local-first retrieval-first RAG platform with project-centric knowledge management.
 
 ## Features
 
-- **Project-based Organization**: Group documents and conversations by project
+- **Project-based Organization**: Group documents and retrieval workflows by project
 - **Modular RAG Engine**: Configurable strategies for ingestion, chunking, retrieval, and reranking
-- **Real-time Chat**: WebSocket-based streaming with source attribution
-- **Admin Dashboard**: User management and token usage analytics
+- **Retrieval API**: Stateless query endpoint returning ranked chunks and metadata
+- **Admin Dashboard**: User and document management
 - **Self-hosted**: Runs entirely on your infrastructure
 
 ## Quick Start
@@ -17,6 +17,19 @@ A high-performance, local-first RAG (Retrieval-Augmented Generation) platform wi
 - Docker & Docker Compose
 - Python 3.11+ with uv
 - Node.js 18+ with pnpm
+- **System Dependencies (for OCR/PDFs)**:
+  - Tesseract OCR (`tesseract-ocr`)
+  - Poppler Utils (`poppler-utils`)
+
+#### Installation (Ubuntu/Debian)
+```bash
+sudo apt update && sudo apt install -y tesseract-ocr poppler-utils
+```
+
+#### Installation (macOS)
+```bash
+brew install tesseract poppler
+```
 
 ### 1. Start Infrastructure
 
@@ -27,7 +40,6 @@ docker compose up -d
 
 This starts:
 - PostgreSQL (port 5432)
-- Redis (port 6379)
 - Qdrant (port 6333)
 - MinIO (port 9000, console: 9001)
 
@@ -76,7 +88,7 @@ FlexSearch/
 │   ├── app/
 │   │   ├── api/          # FastAPI routers
 │   │   ├── core/         # Config, security, deps
-│   │   ├── db/           # PostgreSQL + Redis
+│   │   ├── db/           # PostgreSQL
 │   │   ├── rag/          # RAG pipeline + strategies
 │   │   ├── services/     # Storage, Vector, LLM
 │   │   └── schemas/      # Pydantic models
@@ -99,15 +111,15 @@ FlexSearch/
 | POST | `/api/auth/login` | Login, get JWT tokens |
 | GET | `/api/projects` | List user's projects |
 | POST | `/api/projects` | Create project |
-| POST | `/api/documents/upload/{project_id}` | Upload document |
-| WS | `/api/chat/ws/{session_id}` | Chat WebSocket |
+| POST | `/api/projects/{project_id}/documents/upload` | Upload document |
+| POST | `/api/retrieval/query` | Retrieve relevant chunks for query |
 | GET | `/api/admin/stats` | System statistics (admin) |
 
 ## Tech Stack
 
-**Backend**: FastAPI, SQLAlchemy, Redis, Qdrant, MinIO, LiteLLM  
+**Backend**: FastAPI, SQLAlchemy, Qdrant, MinIO, LiteLLM  
 **Frontend**: React, TypeScript, Tailwind CSS, Zustand, Vite  
-**Infrastructure**: PostgreSQL, Redis, Qdrant, MinIO
+**Infrastructure**: PostgreSQL, Qdrant, MinIO
 
 ## License
 

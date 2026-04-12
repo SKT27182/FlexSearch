@@ -261,6 +261,11 @@ class RAGPipeline:
         self._vector_store.delete_by_document(document_id)
         logger.info(f"Deleted RAG data for document: {document_id}")
 
+    @property
+    def retrieval_strategy(self) -> str:
+        """Get active retrieval strategy name."""
+        return self._retrieval.name
+
 
 # Singleton instance
 _rag_pipeline: RAGPipeline | None = None

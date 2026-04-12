@@ -53,3 +53,4 @@ docker/data/
 # Misc
 *.bak
 *.tmp
+.pytest_cache

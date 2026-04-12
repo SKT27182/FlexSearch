@@ -4,7 +4,7 @@ FlexSearch Backend - Admin API Router
 Admin-only endpoints for user management, file management, and system overview.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db, require_admin
 from app.core.security import get_password_hash
-from app.db.models import Document, DocumentStatus, Project, TokenUsage, User, UserRole
+from app.db.models import Document, DocumentStatus, Project, User, UserRole
 from app.schemas.auth import UserResponse
 from app.services.storage import get_storage_service
 from app.services.vector_store import get_vector_store
@@ -45,10 +45,6 @@ class UserStats(BaseModel):
     role: str
     project_count: int
     document_count: int
-    total_input_tokens: int
-    total_output_tokens: int
-    total_requests: int
-    avg_latency_ms: float
     created_at: datetime
 
 
@@ -201,27 +197,12 @@ async def get_user_stats(
         )
     ).scalar() or 0
 
-    # Get token usage stats
-    token_stats = await db.execute(
-        select(
-            func.coalesce(func.sum(TokenUsage.input_tokens), 0).label("total_input"),
-            func.coalesce(func.sum(TokenUsage.output_tokens), 0).label("total_output"),
-            func.count(TokenUsage.id).label("total_requests"),
-            func.coalesce(func.avg(TokenUsage.latency_ms), 0).label("avg_latency"),
-        ).where(TokenUsage.user_id == user_id)
-    )
-    stats = token_stats.first()
-
     return UserStats(
         user_id=str(user.id),
         email=user.email,
         role=user.role.value,
         project_count=project_count,
         document_count=document_count,
-        total_input_tokens=stats.total_input,
-        total_output_tokens=stats.total_output,
-        total_requests=stats.total_requests,
-        avg_latency_ms=float(stats.avg_latency),
         created_at=user.created_at,
     )
 
@@ -260,21 +241,6 @@ async def get_all_user_stats(
             )
         ).scalar() or 0
 
-        # Token usage
-        token_stats = await db.execute(
-            select(
-                func.coalesce(func.sum(TokenUsage.input_tokens), 0).label(
-                    "total_input"
-                ),
-                func.coalesce(func.sum(TokenUsage.output_tokens), 0).label(
-                    "total_output"
-                ),
-                func.count(TokenUsage.id).label("total_requests"),
-                func.coalesce(func.avg(TokenUsage.latency_ms), 0).label("avg_latency"),
-            ).where(TokenUsage.user_id == user.id)
-        )
-        stats = token_stats.first()
-
         stats_list.append(
             UserStats(
                 user_id=str(user.id),
@@ -282,10 +248,6 @@ async def get_all_user_stats(
                 role=user.role.value,
                 project_count=project_count,
                 document_count=document_count,
-                total_input_tokens=stats.total_input,
-                total_output_tokens=stats.total_output,
-                total_requests=stats.total_requests,
-                avg_latency_ms=float(stats.avg_latency),
                 created_at=user.created_at,
             )
         )
@@ -370,7 +332,7 @@ async def list_all_documents(
                 "id": str(doc.id),
                 "filename": doc.filename,
                 "content_type": doc.content_type,
-                "size_bytes": doc.size_bytes,
+                "size_bytes": doc.file_size,
                 "status": doc.status.value,
                 "chunk_count": doc.chunk_count,
                 "project_id": str(doc.project_id),
@@ -416,28 +378,6 @@ async def get_system_stats(
     )
     doc_status = {status.value: count for status, count in status_counts.all()}
 
-    # Token usage stats
-    token_stats = await db.execute(
-        select(
-            func.sum(TokenUsage.input_tokens).label("total_input"),
-            func.sum(TokenUsage.output_tokens).label("total_output"),
-            func.count(TokenUsage.id).label("total_requests"),
-            func.avg(TokenUsage.latency_ms).label("avg_latency"),
-        )
-    )
-    stats = token_stats.first()
-
-    # Usage last 24h
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-    recent_stats = await db.execute(
-        select(
-            func.sum(TokenUsage.input_tokens).label("total_input"),
-            func.sum(TokenUsage.output_tokens).label("total_output"),
-            func.count(TokenUsage.id).label("total_requests"),
-        ).where(TokenUsage.created_at >= yesterday)
-    )
-    recent = recent_stats.first()
-
     return {
         "users": {
             "total": user_count,
@@ -448,16 +388,5 @@ async def get_system_stats(
         "documents": {
             "total": document_count,
             "by_status": doc_status,
-        },
-        "token_usage": {
-            "total_input_tokens": stats.total_input or 0,
-            "total_output_tokens": stats.total_output or 0,
-            "total_requests": stats.total_requests or 0,
-            "average_latency_ms": float(stats.avg_latency or 0),
-        },
-        "last_24h": {
-            "input_tokens": recent.total_input or 0,
-            "output_tokens": recent.total_output or 0,
-            "requests": recent.total_requests or 0,
         },
     }

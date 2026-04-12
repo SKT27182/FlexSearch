@@ -19,13 +19,6 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-
   qdrant:
     image: qdrant/qdrant:latest
     volumes:
@@ -48,14 +41,12 @@ services:
       dockerfile: Dockerfile
     environment:
       - DATABASE_URL=postgresql+asyncpg://flexsearch:${DB_PASSWORD}@postgres:5432/flexsearch
-      - REDIS_URL=redis://redis:6379
       - QDRANT_HOST=qdrant
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
     depends_on:
       - postgres
-      - redis
       - qdrant
       - minio
     restart: unless-stopped
@@ -83,7 +74,6 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   qdrant_data:
   minio_data:
 ```
@@ -189,7 +179,6 @@ uv pip install -e .
 
 # Set environment
 export DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/flexsearch
-export REDIS_URL=redis://host:6379
 
 # Run with Gunicorn
 pip install gunicorn
@@ -214,11 +203,10 @@ pnpm run build
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL async connection string |
-| `REDIS_URL` | Yes | Redis connection string |
 | `JWT_SECRET_KEY` | Yes | Secret for JWT signing |
 | `QDRANT_HOST` | Yes | Qdrant server hostname |
 | `MINIO_ENDPOINT` | Yes | MinIO server endpoint |
 | `MINIO_ACCESS_KEY` | Yes | MinIO access key |
 | `MINIO_SECRET_KEY` | Yes | MinIO secret key |
-| `LLM_API_KEY` | Yes | API key for LLM provider |
-| `LLM_MODEL` | No | LLM model name (default: gpt-4o-mini) |
+| `LLM_API_KEY` | Conditional | API key used only when `EXTRACTION_STRATEGY=vlm` |
+| `LLM_MODEL` | Conditional | Vision-capable model used only for VLM extraction |

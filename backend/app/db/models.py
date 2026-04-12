@@ -1,7 +1,7 @@
 """
 FlexSearch Backend - SQLAlchemy Models
 
-Database models for Users, Projects, Documents, and TokenUsage.
+Database models for Users, Projects, and Documents.
 """
 
 import enum
@@ -78,11 +78,6 @@ class User(Base):
         back_populates="owner",
         cascade="all, delete-orphan",
     )
-    token_usage: Mapped[list["TokenUsage"]] = relationship(
-        "TokenUsage",
-        back_populates="user",
-        cascade="all, delete-orphan",
-    )
 
 
 class Project(Base):
@@ -128,11 +123,6 @@ class Project(Base):
     )
     documents: Mapped[list["Document"]] = relationship(
         "Document",
-        back_populates="project",
-        cascade="all, delete-orphan",
-    )
-    token_usage: Mapped[list["TokenUsage"]] = relationship(
-        "TokenUsage",
         back_populates="project",
         cascade="all, delete-orphan",
     )
@@ -198,68 +188,4 @@ class Document(Base):
     project: Mapped["Project"] = relationship(
         "Project",
         back_populates="documents",
-    )
-
-
-class TokenUsage(Base):
-    """Token usage tracking for LLM calls."""
-
-    __tablename__ = "token_usage"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    session_id: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-        index=True,
-    )
-    model_name: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-    )
-    provider: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-    )
-    input_tokens: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-    )
-    output_tokens: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-    )
-    latency_ms: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    # Relationships
-    user: Mapped["User"] = relationship(
-        "User",
-        back_populates="token_usage",
-    )
-    project: Mapped["Project"] = relationship(
-        "Project",
-        back_populates="token_usage",
     )

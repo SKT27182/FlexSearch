@@ -24,7 +24,10 @@ class VectorStoreService:
     """Qdrant vector store service."""
 
     def __init__(self) -> None:
-        self._client = QdrantClient(url=settings.qdrant_url)
+        self._client = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+        )
         self._collection = COLLECTION_NAME
         self._vector_size = 384  # all-MiniLM-L6-v2 dimensions
 

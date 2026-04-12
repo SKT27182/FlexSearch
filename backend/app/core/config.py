@@ -5,9 +5,9 @@ All environment variables are loaded here. Other modules import settings
 from this file - never use os.getenv() directly elsewhere.
 """
 
-from typing import Literal
+from typing import Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,27 +15,39 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Look for .env in current dir, parent dir, or /app dir (for Docker)
+        env_file=(".env", "../.env", "/app/.env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        protected_namespaces=("settings_",),
     )
 
     # =========================================================================
     # DATABASE
     # =========================================================================
-    postgres_url: str = Field(
-        default="postgresql+asyncpg://flexsearch:flexsearch_secret@localhost:5432/flexsearch",
-        description="PostgreSQL connection URL",
+    # No defaults for sensitive/environment-specific fields to force picking from .env
+    postgres_user: str = Field(description="PostgreSQL user")
+    postgres_password: str = Field(description="PostgreSQL password")
+    postgres_host: str = Field(default="localhost")
+    postgres_port: int = Field(default=5432)
+    postgres_db: str = Field(default="flexsearch")
+    
+    # This will be constructed if not provided
+    postgres_url: Optional[str] = Field(
+        default=None,
+        description="Full PostgreSQL connection URL (overrides individual components if provided)",
     )
 
-    # =========================================================================
-    # REDIS
-    # =========================================================================
-    redis_url: str = Field(
-        default="redis://localhost:6379/0",
-        description="Redis connection URL",
-    )
+    @model_validator(mode="after")
+    def assemble_postgres_url(self) -> "Settings":
+        """Construct postgres_url if not provided explicitly."""
+        if not self.postgres_url:
+            self.postgres_url = (
+                f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@"
+                f"{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
+        return self
 
     # =========================================================================
     # QDRANT
@@ -43,6 +55,10 @@ class Settings(BaseSettings):
     qdrant_url: str = Field(
         default="http://localhost:6333",
         description="Qdrant server URL",
+    )
+    qdrant_api_key: str = Field(
+        default="",
+        description="Qdrant API key (optional)",
     )
     qdrant_hnsw_m: int = Field(
         default=16,
@@ -61,11 +77,9 @@ class Settings(BaseSettings):
         description="MinIO server endpoint",
     )
     minio_access_key: str = Field(
-        default="minioadmin",
         description="MinIO access key",
     )
     minio_secret_key: str = Field(
-        default="minioadmin",
         description="MinIO secret key",
     )
     minio_bucket: str = Field(
@@ -81,7 +95,6 @@ class Settings(BaseSettings):
     # AUTHENTICATION
     # =========================================================================
     jwt_secret: str = Field(
-        default="your-super-secret-jwt-key-change-in-production",
         description="JWT signing secret",
     )
     jwt_algorithm: str = Field(
@@ -108,7 +121,9 @@ class Settings(BaseSettings):
         default="ocr",
         description="Document extraction strategy",
     )
-    chunking_strategy: Literal["fixed_window", "recursive", "semantic", "parent_child"] = Field(
+    chunking_strategy: Literal[
+        "fixed_window", "recursive", "semantic", "parent_child"
+    ] = Field(
         default="fixed_window",
         description="Text chunking strategy",
     )
@@ -122,7 +137,7 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
-    # LLM (via LiteLLM)
+    # LLM (via LiteLLM) - used only for VLM extraction strategy
     # =========================================================================
     model_name: str = Field(
         default="gpt-4o-mini",

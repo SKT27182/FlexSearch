@@ -24,11 +24,9 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.22",
     "qdrant-client>=1.16.2",
-    "redis>=7.1.0",
     "sentence-transformers>=5.2.2",
     "sqlalchemy[asyncio]>=2.0.46",
     "uvicorn[standard]>=0.40.0",
-    "websockets>=16.0",
 ]
 
 [dependency-groups]

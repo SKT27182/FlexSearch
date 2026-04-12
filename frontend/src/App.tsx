@@ -6,10 +6,19 @@ import {
   DashboardPage, 
   ProjectsPage, 
   ProjectDetailPage, 
-  ChatPage,
   AdminPage,
   SettingsPage,
 } from '@/pages';
+
+import { useAuthStore } from '@/stores';
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuthStore();
+  if (user?.role !== 'ADMIN') {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
 
 export function App() {
   return (
@@ -24,9 +33,15 @@ export function App() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:id" element={<ProjectDetailPage />} />
-          <Route path="/chat" element={<ChatPage />} />
           <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/admin" element={<AdminPage />} />
+          <Route 
+            path="/admin" 
+            element={
+              <AdminRoute>
+                <AdminPage />
+              </AdminRoute>
+            } 
+          />
         </Route>
 
         {/* Fallback */}

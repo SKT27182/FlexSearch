@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.sql import text
 
 from app.core.config import settings
 
@@ -59,6 +60,8 @@ async def init_db() -> None:
     """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Cleanup legacy table removed in retrieval-only mode.
+        await conn.execute(text("DROP TABLE IF EXISTS token_usage"))
     logger.info("Database tables initialized")
 
 

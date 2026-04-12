@@ -1,63 +1,43 @@
 import { useState, useEffect } from 'react';
-import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2 } from 'lucide-react';
+import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2, Search, ExternalLink, Loader2 } from 'lucide-react';
 import { Button, Input, Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
-import { cn, formatRelativeTime } from '@/lib/utils';
-import { api } from '@/lib/api';
-
-interface UserStats {
-  user_id: string;
-  email: string;
-  role: string;
-  project_count: number;
-  document_count: number;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  total_requests: number;
-  avg_latency_ms: number;
-  created_at: string;
-}
-
-interface SystemStats {
-  users: { total: number; admins: number; regular: number };
-  projects: number;
-  documents: { total: number; by_status: Record<string, number> };
-  token_usage: {
-    total_input_tokens: number;
-    total_output_tokens: number;
-    total_requests: number;
-    average_latency_ms: number;
-  };
-  last_24h: {
-    input_tokens: number;
-    output_tokens: number;
-    requests: number;
-  };
-}
+import { cn, formatRelativeTime, formatFileSize } from '@/lib/utils';
+import { adminApi, type AdminUserStats, type AdminSystemStats, type AdminDocument } from '@/lib/api';
 
 export function AdminPage() {
   const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'documents'>('overview');
-  const [stats, setStats] = useState<SystemStats | null>(null);
-  const [userStats, setUserStats] = useState<UserStats[]>([]);
+  const [stats, setStats] = useState<AdminSystemStats | null>(null);
+  const [userStats, setUserStats] = useState<AdminUserStats[]>([]);
+  const [documents, setDocuments] = useState<AdminDocument[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // User creation state
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState<'USER' | 'ADMIN'>('USER');
   const [creating, setCreating] = useState(false);
 
+  // Document search/filter
+  const [docSearch, setDocSearch] = useState('');
+
   useEffect(() => {
     loadData();
-  }, []);
+  }, [activeTab]);
 
   const loadData = async () => {
     setIsLoading(true);
     try {
-      const [statsRes, usersRes] = await Promise.all([
-        api.get<SystemStats>('/admin/stats'),
-        api.get<UserStats[]>('/admin/users/stats/all'),
-      ]);
-      setStats(statsRes.data);
-      setUserStats(usersRes.data);
+      if (activeTab === 'overview') {
+        const statsRes = await adminApi.getStats();
+        setStats(statsRes);
+      } else if (activeTab === 'users') {
+        const usersRes = await adminApi.getAllUserStats();
+        setUserStats(usersRes);
+      } else if (activeTab === 'documents') {
+        const docsRes = await adminApi.listDocuments();
+        setDocuments(docsRes || []);
+      }
     } catch (error) {
       console.error('Failed to load admin data:', error);
     } finally {
@@ -71,7 +51,7 @@ export function AdminPage() {
 
     setCreating(true);
     try {
-      await api.post('/admin/users', {
+      await adminApi.createUser({
         email: newUserEmail,
         password: newUserPassword,
         role: newUserRole,
@@ -88,10 +68,10 @@ export function AdminPage() {
   };
 
   const handleDeleteUser = async (userId: string, email: string) => {
-    if (!confirm(`Delete user "${email}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete user "${email}"? This will delete all their projects and documents.`)) return;
 
     try {
-      await api.delete(`/admin/users/${userId}`);
+      await adminApi.deleteUser(userId);
       loadData();
     } catch (error) {
       console.error('Failed to delete user:', error);
@@ -100,18 +80,32 @@ export function AdminPage() {
 
   const handleChangeRole = async (userId: string, newRole: string) => {
     try {
-      await api.patch(`/admin/users/${userId}/role?role=${newRole}`);
+      await adminApi.updateUserRole(userId, newRole);
       loadData();
     } catch (error) {
       console.error('Failed to update role:', error);
     }
   };
 
-  const formatNumber = (n: number) => {
-    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-    return n.toString();
+  const handleDeleteDocument = async (docId: string, filename: string) => {
+    if (!confirm(`Delete document "${filename}"?`)) return;
+
+    try {
+      await adminApi.deleteDocument(docId);
+      setDocuments(prev => prev.filter(d => d.id !== docId));
+    } catch (error) {
+      console.error('Failed to delete document:', error);
+    }
   };
+
+  const filteredDocs = (documents || []).filter(doc => {
+    const search = docSearch.toLowerCase();
+    return (
+      (doc.filename?.toLowerCase() || '').includes(search) ||
+      (doc.owner_email?.toLowerCase() || '').includes(search) ||
+      (doc.project_name?.toLowerCase() || '').includes(search)
+    );
+  });
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
@@ -119,16 +113,19 @@ export function AdminPage() {
     { id: 'documents', label: 'Documents', icon: FileText },
   ] as const;
 
-  if (isLoading) {
+  // Global loading state for initial load
+  const isInitialLoading = isLoading && !stats && userStats.length === 0 && documents.length === 0;
+
+  if (isInitialLoading) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <div className="animate-spin rounded-full h-8 w-8 border-2 border-primary border-t-transparent" />
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
       </div>
     );
   }
 
   return (
-    <div className="p-8 animate-fade-in">
+    <div className="p-8 animate-fade-in max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
         <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-accent">
@@ -136,7 +133,7 @@ export function AdminPage() {
         </div>
         <div>
           <h1 className="text-3xl font-bold">Admin Panel</h1>
-          <p className="text-muted-foreground">System management and analytics</p>
+          <p className="text-muted-foreground">System management and global overview</p>
         </div>
       </div>
 
@@ -161,9 +158,8 @@ export function AdminPage() {
 
       {/* Overview Tab */}
       {activeTab === 'overview' && stats && (
-        <div className="space-y-8">
-          {/* Stats Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <Card>
               <CardContent className="p-6">
                 <div className="flex items-center justify-between">
@@ -208,74 +204,27 @@ export function AdminPage() {
                 </div>
               </CardContent>
             </Card>
-
-            <Card>
-              <CardContent className="p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-muted-foreground">API Requests</p>
-                    <p className="text-3xl font-bold">{formatNumber(stats.token_usage.total_requests)}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {formatNumber(stats.last_24h.requests)} last 24h
-                    </p>
-                  </div>
-                  <div className="p-3 rounded-xl bg-green-500/10">
-                    <BarChart3 className="h-6 w-6 text-green-500" />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
           </div>
 
-          {/* Token Usage */}
           <Card>
             <CardHeader>
-              <CardTitle>Token Usage</CardTitle>
+              <CardTitle>Document Processing Summary</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="p-4 rounded-lg bg-secondary">
-                  <p className="text-sm text-muted-foreground">Total Input Tokens</p>
-                  <p className="text-2xl font-bold">{formatNumber(stats.token_usage.total_input_tokens)}</p>
-                  <p className="text-xs text-primary mt-1">
-                    +{formatNumber(stats.last_24h.input_tokens)} last 24h
-                  </p>
-                </div>
-                <div className="p-4 rounded-lg bg-secondary">
-                  <p className="text-sm text-muted-foreground">Total Output Tokens</p>
-                  <p className="text-2xl font-bold">{formatNumber(stats.token_usage.total_output_tokens)}</p>
-                  <p className="text-xs text-primary mt-1">
-                    +{formatNumber(stats.last_24h.output_tokens)} last 24h
-                  </p>
-                </div>
-                <div className="p-4 rounded-lg bg-secondary">
-                  <p className="text-sm text-muted-foreground">Avg Latency</p>
-                  <p className="text-2xl font-bold">{stats.token_usage.average_latency_ms.toFixed(0)}ms</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Document Status */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Document Processing Status</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex gap-4">
+              <div className="flex flex-wrap gap-4">
                 {Object.entries(stats.documents.by_status).map(([status, count]) => (
                   <div
                     key={status}
                     className={cn(
-                      'flex-1 p-4 rounded-lg text-center',
-                      status === 'COMPLETED' && 'bg-green-500/10 text-green-500',
-                      status === 'PROCESSING' && 'bg-blue-500/10 text-blue-500',
-                      status === 'PENDING' && 'bg-amber-500/10 text-amber-500',
-                      status === 'FAILED' && 'bg-red-500/10 text-red-500'
+                      'flex-1 min-w-[150px] p-6 rounded-xl text-center border',
+                      status === 'completed' && 'bg-emerald-500/5 border-emerald-500/20 text-emerald-600',
+                      status === 'processing' && 'bg-blue-500/5 border-blue-500/20 text-blue-600',
+                      status === 'pending' && 'bg-amber-500/5 border-amber-500/20 text-amber-600',
+                      status === 'failed' && 'bg-red-500/5 border-red-500/20 text-red-600'
                     )}
                   >
-                    <p className="text-2xl font-bold">{count}</p>
-                    <p className="text-sm capitalize">{status.toLowerCase()}</p>
+                    <p className="text-3xl font-bold mb-1">{count as number}</p>
+                    <p className="text-xs font-semibold uppercase tracking-wider opacity-80">{status}</p>
                   </div>
                 ))}
               </div>
@@ -286,21 +235,27 @@ export function AdminPage() {
 
       {/* Users Tab */}
       {activeTab === 'users' && (
-        <div className="space-y-6">
-          {/* Create User Form */}
+        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle>User Management</CardTitle>
+              <div>
+                <CardTitle>User Accounts</CardTitle>
+                <p className="text-sm text-muted-foreground mt-1">Manage users and their permissions</p>
+              </div>
               <Button onClick={() => setShowCreateUser(!showCreateUser)}>
-                <Plus className="h-4 w-4 mr-2" />
-                Add User
+                {showCreateUser ? 'Cancel' : (
+                  <>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create User
+                  </>
+                )}
               </Button>
             </CardHeader>
             {showCreateUser && (
-              <CardContent>
-                <form onSubmit={handleCreateUser} className="flex gap-4 items-end">
-                  <div className="flex-1">
-                    <label className="text-sm font-medium mb-1 block">Email</label>
+              <CardContent className="border-b border-border bg-secondary/20">
+                <form onSubmit={handleCreateUser} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                  <div className="md:col-span-1">
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5 block">Email</label>
                     <Input
                       type="email"
                       placeholder="user@example.com"
@@ -309,8 +264,8 @@ export function AdminPage() {
                       required
                     />
                   </div>
-                  <div className="flex-1">
-                    <label className="text-sm font-medium mb-1 block">Password</label>
+                  <div className="md:col-span-1">
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5 block">Password</label>
                     <Input
                       type="password"
                       placeholder="••••••••"
@@ -319,89 +274,96 @@ export function AdminPage() {
                       required
                     />
                   </div>
-                  <div className="w-32">
-                    <label className="text-sm font-medium mb-1 block">Role</label>
+                  <div className="md:col-span-1">
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5 block">Role</label>
                     <select
                       value={newUserRole}
                       onChange={(e) => setNewUserRole(e.target.value as 'USER' | 'ADMIN')}
                       className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm"
                     >
-                      <option value="USER">User</option>
-                      <option value="ADMIN">Admin</option>
+                      <option value="USER">Regular User</option>
+                      <option value="ADMIN">Administrator</option>
                     </select>
                   </div>
-                  <Button type="submit" isLoading={creating}>
-                    Create
+                  <Button type="submit" disabled={creating} className="w-full">
+                    {creating ? 'Creating...' : 'Create Account'}
                   </Button>
                 </form>
               </CardContent>
             )}
-          </Card>
-
-          {/* Users Table */}
-          <Card>
             <CardContent className="p-0">
-              <table className="w-full">
-                <thead className="border-b border-border">
-                  <tr className="text-left text-sm text-muted-foreground">
-                    <th className="p-4">User</th>
-                    <th className="p-4">Role</th>
-                    <th className="p-4">Projects</th>
-                    <th className="p-4">Documents</th>
-                    <th className="p-4">Tokens Used</th>
-                    <th className="p-4">Requests</th>
-                    <th className="p-4">Joined</th>
-                    <th className="p-4"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {userStats.map((user) => (
-                    <tr key={user.user_id} className="hover:bg-secondary/50">
-                      <td className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-accent flex items-center justify-center text-primary-foreground text-sm font-medium">
-                            {user.email[0].toUpperCase()}
-                          </div>
-                          <span className="font-medium">{user.email}</span>
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <select
-                          value={user.role}
-                          onChange={(e) => handleChangeRole(user.user_id, e.target.value)}
-                          className={cn(
-                            'px-2 py-1 rounded text-xs font-medium',
-                            user.role === 'ADMIN'
-                              ? 'bg-primary/10 text-primary'
-                              : 'bg-secondary text-muted-foreground'
-                          )}
-                        >
-                          <option value="USER">User</option>
-                          <option value="ADMIN">Admin</option>
-                        </select>
-                      </td>
-                      <td className="p-4">{user.project_count}</td>
-                      <td className="p-4">{user.document_count}</td>
-                      <td className="p-4">
-                        {formatNumber(user.total_input_tokens + user.total_output_tokens)}
-                      </td>
-                      <td className="p-4">{user.total_requests}</td>
-                      <td className="p-4 text-muted-foreground text-sm">
-                        {formatRelativeTime(user.created_at)}
-                      </td>
-                      <td className="p-4">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDeleteUser(user.user_id, user.email)}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="text-left text-xs font-bold uppercase tracking-wider text-muted-foreground border-b border-border">
+                      <th className="p-4">User</th>
+                      <th className="p-4">Role</th>
+                      <th className="p-4">Projects</th>
+                      <th className="p-4">Docs</th>
+                      <th className="p-4">Joined</th>
+                      <th className="p-4 text-right">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-border text-sm">
+                    {isLoading && userStats.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-12 text-center">
+                          <Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" />
+                        </td>
+                      </tr>
+                    ) : userStats.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-12 text-center text-muted-foreground">
+                          No users found
+                        </td>
+                      </tr>
+                    ) : (
+                      userStats.map((user) => (
+                        <tr key={user.user_id} className="hover:bg-secondary/30 transition-colors">
+                          <td className="p-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center text-primary font-bold text-xs">
+                                {user.email[0].toUpperCase()}
+                              </div>
+                              <span className="font-medium">{user.email}</span>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <select
+                              value={user.role}
+                              onChange={(e) => handleChangeRole(user.user_id, e.target.value)}
+                              className={cn(
+                                'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider',
+                                user.role === 'ADMIN'
+                                  ? 'bg-primary/10 text-primary border border-primary/20'
+                                  : 'bg-secondary text-muted-foreground border border-border'
+                              )}
+                            >
+                              <option value="USER">User</option>
+                              <option value="ADMIN">Admin</option>
+                            </select>
+                          </td>
+                          <td className="p-4 font-mono">{user.project_count}</td>
+                          <td className="p-4 font-mono">{user.document_count}</td>
+                          <td className="p-4 text-muted-foreground">
+                            {formatRelativeTime(user.created_at)}
+                          </td>
+                          <td className="p-4 text-right">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                              onClick={() => handleDeleteUser(user.user_id, user.email)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -409,16 +371,117 @@ export function AdminPage() {
 
       {/* Documents Tab */}
       {activeTab === 'documents' && (
-        <Card>
-          <CardHeader>
-            <CardTitle>All Documents</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-muted-foreground text-center py-8">
-              Document management view coming soon
-            </p>
-          </CardContent>
-        </Card>
+        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <Card>
+            <CardHeader className="pb-4">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <CardTitle>Global Document Registry</CardTitle>
+                  <p className="text-sm text-muted-foreground mt-1">Review and manage all system documents</p>
+                </div>
+                <div className="relative w-full md:w-72">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search documents, owners..."
+                    className="pl-9"
+                    value={docSearch}
+                    onChange={(e) => setDocSearch(e.target.value)}
+                  />
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="text-left text-xs font-bold uppercase tracking-wider text-muted-foreground border-b border-border">
+                      <th className="p-4">File Name</th>
+                      <th className="p-4">Owner</th>
+                      <th className="p-4">Project</th>
+                      <th className="p-4">Size</th>
+                      <th className="p-4">Status</th>
+                      <th className="p-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border text-sm">
+                    {isLoading && documents.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-12 text-center">
+                          <Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" />
+                        </td>
+                      </tr>
+                    ) : filteredDocs.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-12 text-center text-muted-foreground">
+                          {isLoading ? (
+                            <Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" />
+                          ) : (
+                            'No documents found'
+                          )}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredDocs.map((doc) => (
+                        <tr key={doc.id} className="hover:bg-secondary/30 transition-colors">
+                          <td className="p-4">
+                            <div className="flex items-center gap-3">
+                              <FileText className="h-4 w-4 text-primary shrink-0" />
+                              <span className="font-medium truncate max-w-[200px]">{doc.filename}</span>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <div className="flex flex-col">
+                              <span className="truncate max-w-[150px]">{doc.owner_email}</span>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <div className="flex items-center gap-1.5 text-muted-foreground">
+                              <span className="truncate max-w-[150px]">{doc.project_name}</span>
+                            </div>
+                          </td>
+                          <td className="p-4 font-mono text-xs">{formatFileSize(doc.size_bytes)}</td>
+                          <td className="p-4">
+                            <span className={cn(
+                              "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border",
+                              doc.status === 'completed' && "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
+                              doc.status === 'failed' && "bg-red-500/10 text-red-600 border-red-500/20",
+                              doc.status === 'processing' && "bg-blue-500/10 text-blue-600 border-blue-500/20",
+                              doc.status === 'pending' && "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                            )}>
+                              {doc.status}
+                            </span>
+                          </td>
+                          <td className="p-4 text-right">
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                asChild
+                              >
+                                <a href={`/projects/${doc.project_id}`} target="_blank" rel="noreferrer">
+                                  <ExternalLink className="h-4 w-4" />
+                                </a>
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                                onClick={() => handleDeleteDocument(doc.id, doc.filename)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   );

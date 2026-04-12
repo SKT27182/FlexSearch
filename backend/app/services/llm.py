@@ -6,7 +6,6 @@ LiteLLM-based LLM provider abstraction.
 
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
 
 import litellm
 from litellm import acompletion
@@ -30,16 +29,6 @@ class LLMResponse:
     model: str
     provider: str
     latency_ms: int
-
-
-@dataclass
-class LLMStreamChunk:
-    """Streaming chunk from LLM."""
-
-    content: str
-    is_final: bool = False
-    input_tokens: int | None = None
-    output_tokens: int | None = None
 
 
 class LLMService:
@@ -101,94 +90,6 @@ class LLMService:
         except Exception as e:
             logger.error(f"LLM completion failed: {e}")
             raise
-
-    async def stream(
-        self,
-        messages: list[dict[str, str]],
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
-    ) -> AsyncGenerator[LLMStreamChunk, None]:
-        """
-        Stream a completion.
-
-        Args:
-            messages: List of message dicts with role and content
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-
-        Yields:
-            LLMStreamChunk for each token/chunk
-        """
-        start_time = time.time()
-        full_content = ""
-
-        try:
-            response = await acompletion(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                api_key=self._api_key,
-                stream=True,
-            )
-
-            async for chunk in response:
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    full_content += delta.content
-                    yield LLMStreamChunk(
-                        content=delta.content,
-                        is_final=False,
-                    )
-
-            # Final chunk with usage info (estimated if not available)
-            latency_ms = int((time.time() - start_time) * 1000)
-            yield LLMStreamChunk(
-                content="",
-                is_final=True,
-                input_tokens=len(str(messages)) // 4,  # Rough estimate
-                output_tokens=len(full_content) // 4,  # Rough estimate
-            )
-
-        except Exception as e:
-            logger.error(f"LLM streaming failed: {e}")
-            raise
-
-    async def build_rag_prompt(
-        self,
-        query: str,
-        context_chunks: list[dict[str, Any]],
-        system_prompt: str | None = None,
-    ) -> list[dict[str, str]]:
-        """
-        Build a RAG prompt with retrieved context.
-
-        Args:
-            query: User query
-            context_chunks: Retrieved chunks with content and metadata
-            system_prompt: Optional system prompt override
-
-        Returns:
-            List of messages for completion
-        """
-        default_system = """You are a helpful assistant that answers questions based on the provided context.
-Use the context to answer the user's question accurately. If the context doesn't contain relevant information,
-say so clearly. Always cite your sources when possible."""
-
-        context_text = "\n\n".join(
-            f"[Source: {chunk.get('metadata', {}).get('filename', 'Unknown')}]\n{chunk.get('content', '')}"
-            for chunk in context_chunks
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt or default_system},
-            {
-                "role": "user",
-                "content": f"Context:\n{context_text}\n\nQuestion: {query}",
-            },
-        ]
-
-        return messages
 
     @property
     def model_name(self) -> str:

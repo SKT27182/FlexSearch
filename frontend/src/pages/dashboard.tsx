@@ -1,17 +1,16 @@
 import { Link } from 'react-router-dom';
-import { FolderOpen, MessageSquare, FileText, Activity, Plus } from 'lucide-react';
+import { FolderOpen, FileText, Activity, Plus } from 'lucide-react';
 import { useAuthStore, useProjectStore } from '@/stores';
 import { Card, CardHeader, CardTitle, CardContent, buttonVariants } from '@/components/ui';
 import { formatRelativeTime, cn } from '@/lib/utils';
 
 export function DashboardPage() {
   const { user } = useAuthStore();
-  const { projects, sessions } = useProjectStore();
+  const { projects } = useProjectStore();
 
   const stats = [
     { label: 'Projects', value: projects.length, icon: FolderOpen, color: 'from-blue-500 to-cyan-500' },
-    { label: 'Sessions', value: sessions.length, icon: MessageSquare, color: 'from-violet-500 to-purple-500' },
-    { label: 'Documents', value: 0, icon: FileText, color: 'from-amber-500 to-orange-500' },
+    { label: 'Documents', value: projects.reduce((acc, p) => acc + (p.document_count || 0), 0), icon: FileText, color: 'from-amber-500 to-orange-500' },
   ];
 
   return (
@@ -128,9 +127,9 @@ export function DashboardPage() {
                   3
                 </div>
                 <div>
-                  <h3 className="font-medium">Start a Chat</h3>
+                  <h3 className="font-medium">Query Knowledge Base</h3>
                   <p className="text-sm text-muted-foreground">
-                    Query your documents with AI-powered search
+                    Ask questions and retrieve relevant information from your documents
                   </p>
                 </div>
               </div>

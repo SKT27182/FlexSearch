@@ -11,7 +11,6 @@ from typing import Any
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-from app.core.config import settings
 from app.rag.ingestion.base import BaseExtractionStrategy, ExtractedContent
 from app.services.llm import get_llm_service
 from app.utils.logger import create_logger

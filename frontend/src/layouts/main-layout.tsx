@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Navigate, Outlet, Link, useLocation } from 'react-router-dom';
-import { Zap, LayoutDashboard, FolderOpen, MessageSquare, Settings, LogOut, Shield, Loader2 } from 'lucide-react';
+import { Zap, LayoutDashboard, FolderOpen, Settings, LogOut, Shield, Loader2 } from 'lucide-react';
 import { useAuthStore, useProjectStore } from '@/stores';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui';
@@ -8,7 +8,6 @@ import { Button } from '@/components/ui';
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/projects', icon: FolderOpen, label: 'Projects' },
-  { to: '/chat', icon: MessageSquare, label: 'Chat' },
 ];
 
 export function MainLayout() {

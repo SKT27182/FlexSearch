@@ -15,10 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.utils.logger import create_logger
 
-from app.api import admin, analytics, auth, chat, documents, projects, sessions
+from app.api import admin, auth, documents, projects, retrieval
 from app.core.config import settings
 from app.db.postgres import close_db, init_db
-from app.db.redis import close_redis
 
 logger = create_logger(__name__)
 
@@ -34,7 +33,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     logger.info("Shutting down FlexSearch Backend...")
     await close_db()
-    await close_redis()
     logger.info("Cleanup complete")
 
 
@@ -79,10 +77,8 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
-app.include_router(sessions.router, prefix="/api")
-app.include_router(chat.router, prefix="/api")
+app.include_router(retrieval.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
-app.include_router(analytics.router, prefix="/api")
 
 
 @app.get("/")

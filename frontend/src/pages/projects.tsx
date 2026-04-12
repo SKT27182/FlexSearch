@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FolderOpen, Plus, Trash2, FileText, MessageSquare } from 'lucide-react';
+import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
 import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, buttonVariants } from '@/components/ui';
 import { formatRelativeTime, cn } from '@/lib/utils';
@@ -53,7 +53,7 @@ export function ProjectsPage() {
           <form onSubmit={handleCreate}>
             <CardHeader>
               <CardTitle>Create New Project</CardTitle>
-              <CardDescription>A project contains your documents and chat sessions</CardDescription>
+              <CardDescription>A project contains your documents and knowledge base</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
@@ -144,17 +144,10 @@ export function ProjectsPage() {
               <CardFooter className="flex gap-2">
                 <Link 
                   to={`/projects/${project.id}`}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), "flex-1")}
-                >
-                  <FileText className="h-4 w-4 mr-2" />
-                  Documents
-                </Link>
-                <Link 
-                  to={`/chat?project=${project.id}`}
                   className={cn(buttonVariants({ size: 'sm' }), "flex-1")}
                 >
-                  <MessageSquare className="h-4 w-4 mr-2" />
-                  Chat
+                  <FolderOpen className="h-4 w-4 mr-2" />
+                  Open Project
                 </Link>
               </CardFooter>
             </Card>

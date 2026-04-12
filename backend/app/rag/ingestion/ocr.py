@@ -5,6 +5,7 @@ Tesseract-based OCR for text extraction from PDFs and images.
 """
 
 import io
+import shutil
 from typing import Any
 
 import pytesseract
@@ -29,6 +30,26 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
         "text/plain",
         "text/markdown",
     }
+
+    def __init__(self):
+        super().__init__()
+        self._check_dependencies()
+
+    def _check_dependencies(self):
+        """Check if required system binaries are available."""
+        if not shutil.which("tesseract"):
+            logger.error(
+                "Tesseract binary not found in PATH. "
+                "OCR features will be disabled. "
+                "Please install tesseract-ocr (e.g., 'sudo apt install tesseract-ocr' or 'brew install tesseract')."
+            )
+
+        if not shutil.which("pdftoppm"):
+            logger.warning(
+                "pdftoppm (poppler-utils) not found in PATH. "
+                "PDF OCR fallback will be disabled. "
+                "Please install poppler-utils (e.g., 'sudo apt install poppler-utils' or 'brew install poppler')."
+            )
 
     @property
     def name(self) -> str:
@@ -66,6 +87,12 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
 
     async def _extract_pdf(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract text from PDF, using OCR for image-based pages."""
+        if not shutil.which("tesseract"):
+            raise RuntimeError(
+                "Tesseract OCR is not installed or not in PATH. "
+                "Please install 'tesseract-ocr' on your system."
+            )
+
         all_text = []
         images = []
         page_count = 0
@@ -124,6 +151,12 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
 
     async def _extract_image(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract text from image using OCR."""
+        if not shutil.which("tesseract"):
+            raise RuntimeError(
+                "Tesseract OCR is not installed or not in PATH. "
+                "Please install 'tesseract-ocr' on your system."
+            )
+
         image = Image.open(io.BytesIO(content))
 
         # Run OCR

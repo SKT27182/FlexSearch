@@ -116,11 +116,11 @@ Returns 204 No Content.
 
 ### List Documents
 
-**GET** `/api/documents/{project_id}`
+**GET** `/api/projects/{project_id}/documents`
 
 ### Upload Document
 
-**POST** `/api/documents/upload/{project_id}`
+**POST** `/api/projects/{project_id}/documents/upload`
 
 Multipart form data with `file` field.
 
@@ -140,84 +140,45 @@ Supported formats: PDF, TXT, MD, PNG, JPG, JPEG
 
 ### Delete Document
 
-**DELETE** `/api/documents/{document_id}`
+**DELETE** `/api/projects/{project_id}/documents/{document_id}`
 
 ---
 
-## Sessions
+## Retrieval
 
-### List Sessions
+### Query Retrieval
 
-**GET** `/api/sessions/{project_id}`
-
-### Create Session
-
-**POST** `/api/sessions/{project_id}`
+**POST** `/api/retrieval/query`
 
 ```json
+// Request
 {
-  "name": "Chat Session 1"
+  "project_id": "4fbf8b16-33d1-4f01-8f6a-cf2a8bdc93ec",
+  "query": "What does the onboarding document say about approvals?",
+  "top_k": 5
 }
 ```
-
-### Delete Session
-
-**DELETE** `/api/sessions/{session_id}`
-
----
-
-## Chat
-
-### WebSocket Connection
-
-**WS** `/api/chat/ws/{session_id}`
-
-Connect with access token as query param or in first message.
-
-#### Messages
-
-**Send:**
-```json
-{
-  "message": "What is in these documents?"
-}
-```
-
-**Receive:**
-```json
-// Stream start
-{"type": "start"}
-
-// Content chunks
-{"type": "chunk", "content": "Based on "}
-{"type": "chunk", "content": "the documents..."}
-
-// Stream end with sources
-{
-  "type": "end",
-  "sources": [
-    {
-      "filename": "doc.pdf",
-      "chunk_index": 3,
-      "content": "Relevant excerpt..."
-    }
-  ]
-}
-
-// Error
-{"type": "error", "content": "Error message"}
-```
-
-### Get Chat History
-
-**GET** `/api/chat/{session_id}`
 
 ```json
 // Response
-[
-  {"role": "user", "content": "Hello"},
-  {"role": "assistant", "content": "Hi there!"}
-]
+{
+  "project_id": "4fbf8b16-33d1-4f01-8f6a-cf2a8bdc93ec",
+  "query": "What does the onboarding document say about approvals?",
+  "retrieval_strategy": "dense",
+  "total": 2,
+  "chunks": [
+    {
+      "chunk_id": "chunk-uuid",
+      "document_id": "doc-uuid",
+      "content": "Relevant excerpt...",
+      "score": 0.91,
+      "metadata": {
+        "filename": "onboarding.pdf",
+        "chunk_index": 3
+      }
+    }
+  ]
+}
 ```
 
 ---
@@ -232,13 +193,7 @@ Connect with access token as query param or in first message.
 {
   "users": {"total": 10, "admins": 2, "regular": 8},
   "projects": 25,
-  "documents": {"total": 150, "by_status": {"COMPLETED": 140, "PENDING": 10}},
-  "token_usage": {
-    "total_input_tokens": 1000000,
-    "total_output_tokens": 500000,
-    "total_requests": 5000,
-    "average_latency_ms": 250
-  }
+  "documents": {"total": 150, "by_status": {"COMPLETED": 140, "PENDING": 10}}
 }
 ```
 

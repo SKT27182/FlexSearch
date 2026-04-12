@@ -95,6 +95,7 @@ export interface Project {
   name: string;
   description: string | null;
   owner_id: string;
+  document_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -142,7 +143,7 @@ export interface Document {
   filename: string;
   content_type: string;
   size_bytes: number;
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+  status: 'pending' | 'processing' | 'completed' | 'failed';
   chunk_count: number;
   project_id: string;
   created_at: string;
@@ -173,79 +174,98 @@ export const documentsApi = {
   },
 };
 
-// ============ Sessions API ============
+// ============ Retrieval API ============
 
-export interface Session {
-  id: string;
-  name: string;
-  project_id: string;
-  user_id: string;
-  created_at: string;
-  updated_at: string;
+export interface RetrievedChunk {
+  chunk_id: string;
+  document_id: string;
+  content: string;
+  score: number;
+  metadata: Record<string, any>;
 }
 
-export interface SessionListResponse {
-  sessions: Session[];
+export interface RetrievalQueryRequest {
+  project_id: string;
+  query: string;
+  top_k?: number;
+}
+
+export interface RetrievalQueryResponse {
+  project_id: string;
+  query: string;
+  retrieval_strategy: string;
   total: number;
+  chunks: RetrievedChunk[];
 }
 
-export interface CreateSession {
-  name: string;
-  project_id: string;
-}
-
-export const sessionsApi = {
-  list: async (projectId: string): Promise<Session[]> => {
-    const { data } = await api.get<SessionListResponse>(`/sessions/project/${projectId}`);
-    return data.sessions;
-  },
-
-  create: async (session: CreateSession): Promise<Session> => {
-    const { data } = await api.post<Session>('/sessions', session);
+export const retrievalApi = {
+  query: async (request: RetrievalQueryRequest): Promise<RetrievalQueryResponse> => {
+    const { data } = await api.post<RetrievalQueryResponse>('/retrieval/query', request);
     return data;
-  },
-
-  get: async (id: string): Promise<Session> => {
-    const { data } = await api.get<Session>(`/sessions/${id}`);
-    return data;
-  },
-
-  delete: async (id: string): Promise<void> => {
-    await api.delete(`/sessions/${id}`);
   },
 };
 
-// ============ Chat API ============
+// ============ Admin API ============
 
-export interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp?: string;
+export interface AdminUserStats {
+  user_id: string;
+  email: string;
+  role: string;
+  project_count: number;
+  document_count: number;
+  created_at: string;
 }
 
-export const chatApi = {
-  getHistory: async (sessionId: string): Promise<ChatMessage[]> => {
-    const { data } = await api.get<ChatMessage[]>(`/chat/${sessionId}/history`);
+export interface AdminSystemStats {
+  users: { total: number; admins: number; regular: number };
+  projects: number;
+  documents: { total: number; by_status: Record<string, number> };
+}
+
+export interface AdminDocument {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  status: string;
+  chunk_count: number;
+  project_id: string;
+  project_name: string;
+  owner_email: string;
+  created_at: string;
+}
+
+export const adminApi = {
+  getStats: async (): Promise<AdminSystemStats> => {
+    const { data } = await api.get<AdminSystemStats>('/admin/stats');
     return data;
   },
 
-  createWebSocket: (sessionId: string): WebSocket => {
-    const token = localStorage.getItem('access_token');
-    
-    // Determine WebSocket URL based on API_BASE_URL
-    let wsUrl: string;
-    
-    if (API_BASE_URL.startsWith('http')) {
-      // API_BASE_URL is absolute (e.g., http://localhost:8000/api)
-      const apiUrl = new URL(API_BASE_URL);
-      const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${wsProtocol}//${apiUrl.host}${apiUrl.pathname}/chat/ws/${sessionId}?token=${token}`;
-    } else {
-      // API_BASE_URL is relative (e.g., /api) - use current host
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${wsProtocol}//${window.location.host}${API_BASE_URL}/chat/ws/${sessionId}?token=${token}`;
-    }
-    
-    return new WebSocket(wsUrl);
+  getAllUserStats: async (): Promise<AdminUserStats[]> => {
+    const { data } = await api.get<AdminUserStats[]>('/admin/users/stats/all');
+    return data;
+  },
+
+  createUser: async (user: any): Promise<User> => {
+    const { data } = await api.post<User>('/admin/users', user);
+    return data;
+  },
+
+  updateUserRole: async (userId: string, role: string): Promise<User> => {
+    const { data } = await api.patch<User>(`/admin/users/${userId}/role?role=${role}`);
+    return data;
+  },
+
+  deleteUser: async (userId: string): Promise<void> => {
+    await api.delete(`/admin/users/${userId}`);
+  },
+
+  listDocuments: async (): Promise<AdminDocument[]> => {
+    const { data } = await api.get<AdminDocument[]>('/admin/documents');
+    return data;
+  },
+
+  deleteDocument: async (documentId: string): Promise<void> => {
+    await api.delete(`/admin/documents/${documentId}`);
   },
 };
