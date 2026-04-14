@@ -5,6 +5,7 @@ All environment variables are loaded here. Other modules import settings
 from this file - never use os.getenv() directly elsewhere.
 """
 
+import json
 from typing import Literal, Optional
 
 from pydantic import Field, model_validator
@@ -15,8 +16,8 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        # Look for .env in current dir, parent dir, or /app dir (for Docker)
-        env_file=(".env", "../.env", "/app/.env"),
+        # Look for backend-local .env first, then common fallbacks
+        env_file=("backend/.env", ".env", "../.env", "/app/.env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     postgres_host: str = Field(default="localhost")
     postgres_port: int = Field(default=5432)
     postgres_db: str = Field(default="flexsearch")
-    
+
     # This will be constructed if not provided
     postgres_url: Optional[str] = Field(
         default=None,
@@ -60,6 +61,14 @@ class Settings(BaseSettings):
         default="",
         description="Qdrant API key (optional)",
     )
+    qdrant_http_port: int = Field(
+        default=6333,
+        description="Qdrant HTTP port for public/admin links",
+    )
+    qdrant_grpc_port: int = Field(
+        default=6334,
+        description="Qdrant gRPC port",
+    )
     qdrant_hnsw_m: int = Field(
         default=16,
         description="HNSW graph connections parameter",
@@ -85,6 +94,14 @@ class Settings(BaseSettings):
     minio_bucket: str = Field(
         default="flexsearch",
         description="MinIO bucket name",
+    )
+    minio_api_port: int = Field(
+        default=9000,
+        description="MinIO API port for public/admin links",
+    )
+    minio_console_port: int = Field(
+        default=9001,
+        description="MinIO Console port for public/admin links",
     )
     minio_secure: bool = Field(
         default=False,
@@ -155,10 +172,69 @@ class Settings(BaseSettings):
         default=True,
         description="Debug mode",
     )
+    api_port: int = Field(
+        default=8889,
+        description="Backend API port",
+    )
+    service_public_host: str = Field(
+        default="localhost",
+        description="Public host used in generated service links",
+    )
+    cors_origins: str = Field(
+        default="http://localhost:5144,http://127.0.0.1:5144",
+        description="Allowed CORS origins (comma-separated or JSON list)",
+    )
+    # Service metadata (only services used by FlexSearch)
+    postgres_service_name: str = Field(default="postgres")
+    qdrant_service_name: str = Field(default="qdrant")
+    minio_service_name: str = Field(default="minio")
+    postgres_display_name: str = Field(default="PostgreSQL")
+    qdrant_display_name: str = Field(default="Qdrant")
+    minio_display_name: str = Field(default="MinIO")
+    postgres_container_name: str = Field(default="infra-postgres")
+    qdrant_container_name: str = Field(default="infra-qdrant")
+    minio_container_name: str = Field(default="infra-minio")
     log_level: str = Field(
         default="INFO",
         description="Logging level",
     )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse CORS_ORIGINS from comma-separated text or JSON array."""
+        raw = self.cors_origins.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            parsed = json.loads(raw)
+            if not isinstance(parsed, list):
+                raise ValueError("CORS_ORIGINS JSON value must be a list")
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def qdrant_public_url(self) -> str:
+        """Public Qdrant URL based on deploy host and configured port."""
+        return f"http://{self.service_public_host}:{self.qdrant_http_port}"
+
+    @property
+    def minio_public_url(self) -> str:
+        """Public MinIO API URL based on deploy host and configured port."""
+        return f"http://{self.service_public_host}:{self.minio_api_port}"
+
+    @property
+    def minio_console_url(self) -> str:
+        """Public MinIO Console URL based on deploy host and configured port."""
+        return f"http://{self.service_public_host}:{self.minio_console_port}"
+
+    @property
+    def admin_urls(self) -> dict[str, str]:
+        """Centralized service links for admin/UI usage."""
+        return {
+            "qdrant": self.qdrant_public_url,
+            "minio_api": self.minio_public_url,
+            "minio_console": self.minio_console_url,
+        }
 
 
 # Singleton settings instance

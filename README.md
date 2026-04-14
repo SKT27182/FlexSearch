@@ -33,21 +33,14 @@ brew install tesseract poppler
 
 ### 1. Start Infrastructure
 
-```bash
-cd docker
-docker compose up -d
-```
-
-This starts:
-- PostgreSQL (port 5432)
-- Qdrant (port 6333)
-- MinIO (port 9000, console: 9001)
+Make sure the required services (PostgreSQL, Qdrant, MinIO) are already running and reachable on the ports configured in `backend/.env`.
 
 ### 2. Configure Environment
 
 ```bash
-cp .env.example .env
-# Edit .env with your settings (API keys, etc.)
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+# Edit backend/.env and frontend/.env with your settings
 ```
 
 ### 3. Start Backend
@@ -56,7 +49,8 @@ cp .env.example .env
 cd backend
 uv venv && source .venv/bin/activate
 uv pip install -e .
-uvicorn app.main:app --reload --port 8000
+source .env
+uvicorn app.main:app --reload --port "${API_PORT}"
 ```
 
 ### 4. Start Frontend
@@ -67,7 +61,19 @@ pnpm install
 pnpm run dev
 ```
 
-Open http://localhost:3000
+Open http://localhost:5144
+
+### Direct deploy (no Docker)
+
+```bash
+make deploy-local
+```
+
+### Docker + Nginx deployment flow
+
+- Run app containers with Docker Compose (frontend on `127.0.0.1:5144`, backend on `127.0.0.1:8889`).
+- Keep these ports local-only (not publicly exposed).
+- Configure your host Nginx to reverse proxy domain traffic to these localhost ports.
 
 ## RAG Configuration
 
@@ -76,7 +82,7 @@ Configure strategies via environment variables:
 | Variable | Options | Default |
 |----------|---------|---------|
 | `EXTRACTION_STRATEGY` | `ocr`, `vlm` | `ocr` |
-| `CHUNKING_STRATEGY` | `fixed_window`, `recursive`, `semantic`, `parent_child` | `recursive` |
+| `CHUNKING_STRATEGY` | `fixed_window`, `recursive`, `semantic`, `parent_child` | `fixed_window` |
 | `RETRIEVAL_STRATEGY` | `dense`, `parent_child`, `hybrid` | `dense` |
 | `RERANKING_STRATEGY` | `none`, `cross_encoder` | `none` |
 

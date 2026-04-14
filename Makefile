@@ -1,4 +1,4 @@
-.PHONY: help install dev stop restart build test clean up down app-restart app-logs backend-local frontend-local backend frontend logs db-shell redis-cli
+.PHONY: help install dev dev-backend deploy-local deploy-backend deploy-frontend stop restart build test clean up down app-restart app-logs backend-local frontend-local backend frontend logs db-shell redis-cli
 
 # Colors
 CYAN := \033[36m
@@ -9,9 +9,9 @@ BACKEND_VENV := backend/.venv/bin
 BACKEND_PYTHON := $(BACKEND_VENV)/python
 BACKEND_UVICORN := $(BACKEND_VENV)/uvicorn
 
-# Load environment variables from .env if it exists
-ifneq (,$(wildcard ./.env))
-    include .env
+# Load environment variables from backend/.env if it exists
+ifneq (,$(wildcard ./backend/.env))
+    include backend/.env
     export
 endif
 
@@ -24,21 +24,22 @@ help: ## Show this help
 # =============================================================================
 
 install: ## Install all dependencies
-	@echo "Creating backend virtual environment..."
-	cd backend && uv venv
 	@echo "Installing backend dependencies..."
-	cd backend && uv pip install -e .
+	cd backend && uv sync
 	@echo "Installing frontend dependencies..."
 	cd frontend && pnpm install
 	@echo "✅ Installation complete!"
 
-dev: up ## Start FlexSearch app in Docker (Alias for 'up')
+dev: dev-backend ## Start backend locally using backend/.env
+
+dev-backend: backend-local ## Start backend with API_PORT from backend/.env
 
 restart: app-restart ## Restart FlexSearch app in Docker
 
 backend-local: ## Start backend server locally (Host must resolve infra-hub hostnames)
-	@PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
-	$(BACKEND_UVICORN) app.main:app --reload --port 8000 --app-dir backend
+	@bash -c 'set -a; [ -f backend/.env ] && source backend/.env; set +a; \
+	PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
+	$(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-8889}" --app-dir backend'
 
 frontend-local: ## Start frontend dev server locally
 	cd frontend && pnpm run dev
@@ -46,6 +47,19 @@ frontend-local: ## Start frontend dev server locally
 dev-local: ## Start backend + frontend locally (no Docker)
 	@echo "Starting backend and frontend locally..."
 	@make -j2 backend-local frontend-local
+
+deploy-local: ## Deploy backend + frontend directly (no Docker)
+	@echo "Starting backend and frontend deployment servers..."
+	@make -j2 deploy-backend deploy-frontend
+
+deploy-backend: ## Run backend server for direct deployment (no Docker)
+	@bash -c 'set -a; [ -f backend/.env ] && source backend/.env; set +a; \
+	PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
+	$(BACKEND_UVICORN) app.main:app --host 0.0.0.0 --port "$${API_PORT:-8889}" --app-dir backend'
+
+deploy-frontend: ## Build and serve frontend for direct deployment (no Docker)
+	@bash -c 'set -a; [ -f frontend/.env ] && source frontend/.env; set +a; \
+	cd frontend && pnpm run build && pnpm run preview --host 0.0.0.0 --port "$${VITE_PORT:-5144}"'
 
 # Backwards compatibility / aliases
 backend: backend-local

@@ -24,6 +24,8 @@ RUN uv pip install --system -e .
 # Copy application code
 COPY . .
 
-EXPOSE 8000
+ENV API_PORT=8889
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8889
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${API_PORT}"]
