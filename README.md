@@ -53,6 +53,8 @@ source .env
 uvicorn app.main:app --reload --port "${API_PORT}"
 ```
 
+On first run, backend startup ensures the configured PostgreSQL database exists and creates required tables if missing.
+
 ### 4. Start Frontend
 
 ```bash

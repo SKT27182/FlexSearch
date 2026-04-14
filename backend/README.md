@@ -1,6 +1,7 @@
 # FlexSearch Backend
 
 This backend is fully env-driven and reads runtime/deploy values from `backend/.env` via `app/core/config.py`.
+On startup, it also ensures the configured PostgreSQL database exists and creates tables if missing.
 
 ## Key ports for FlexSearch
 
