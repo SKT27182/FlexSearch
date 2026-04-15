@@ -43,32 +43,26 @@ cp frontend/.env.example frontend/.env
 # Edit backend/.env and frontend/.env with your settings
 ```
 
-### 3. Start Backend
+### 3. Install dependencies
 
 ```bash
-cd backend
-uv venv && source .venv/bin/activate
-uv pip install -e .
-source .env
-uvicorn app.main:app --reload --port "${API_PORT}"
+make install
 ```
 
 On first run, backend startup ensures the configured PostgreSQL database exists and creates required tables if missing.
 
-### 4. Start Frontend
+### 4. Run local dev (no Docker)
 
 ```bash
-cd frontend
-pnpm install
-pnpm run dev
+make dev-local
 ```
 
 Open http://localhost:5144
 
-### Direct deploy (no Docker)
+### Run with Docker
 
 ```bash
-make deploy-local
+make dev
 ```
 
 ### Docker + Nginx deployment flow
