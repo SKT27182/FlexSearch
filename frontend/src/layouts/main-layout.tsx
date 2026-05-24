@@ -3,6 +3,7 @@ import { Navigate, Outlet, Link, useLocation } from 'react-router-dom';
 import { Zap, LayoutDashboard, FolderOpen, Settings, LogOut, Shield, Loader2 } from 'lucide-react';
 import { useAuthStore, useProjectStore } from '@/stores';
 import { cn } from '@/lib/utils';
+import { hasAdminAccess } from '@/lib/roles';
 import { Button } from '@/components/ui';
 
 const navItems = [
@@ -83,7 +84,7 @@ export function MainLayout() {
             );
           })}
 
-          {user?.role === 'ADMIN' && (
+          {hasAdminAccess(user?.role) && (
             <Link
               to="/admin"
               className={cn(

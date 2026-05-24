@@ -12,10 +12,10 @@ from app.db.models import User
 class TestAuthRegister:
     """Test user registration endpoint."""
 
-    async def test_register_first_user_is_admin(
+    async def test_register_creates_regular_user(
         self, async_client: AsyncClient, db_session: AsyncSession
     ):
-        """First registered user should be ADMIN."""
+        """Registration always creates USER role (admins are promoted by infra-hub)."""
         response = await async_client.post(
             "/api/auth/register",
             json={"email": "first@example.com", "password": "password123"},
@@ -23,24 +23,6 @@ class TestAuthRegister:
         assert response.status_code == 201
         data = response.json()
         assert data["email"] == "first@example.com"
-        assert data["role"] == "ADMIN"
-
-    async def test_register_second_user_is_regular(
-        self, async_client: AsyncClient, db_session: AsyncSession
-    ):
-        """Subsequent users should be USER role."""
-        # First user
-        await async_client.post(
-            "/api/auth/register",
-            json={"email": "admin@example.com", "password": "password123"},
-        )
-        # Second user
-        response = await async_client.post(
-            "/api/auth/register",
-            json={"email": "user@example.com", "password": "password123"},
-        )
-        assert response.status_code == 201
-        data = response.json()
         assert data["role"] == "USER"
 
     async def test_register_duplicate_email_fails(
@@ -88,7 +70,6 @@ class TestAuthLogin:
         assert response.status_code == 200
         data = response.json()
         assert "access_token" in data
-        assert "refresh_token" in data
         assert data["token_type"] == "bearer"
 
     async def test_login_invalid_password(

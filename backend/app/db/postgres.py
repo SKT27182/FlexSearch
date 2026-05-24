@@ -57,11 +57,50 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+async def _upgrade_user_hierarchy(conn) -> None:
+    """Add INFRA_ADMIN role and infra_hub_user_id for existing deployments."""
+    await conn.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_type t
+                    JOIN pg_enum e ON t.oid = e.enumtypid
+                    WHERE t.typname = 'userrole' AND e.enumlabel = 'INFRA_ADMIN'
+                ) THEN
+                    ALTER TYPE userrole ADD VALUE 'INFRA_ADMIN';
+                END IF;
+            END
+            $$;
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS infra_hub_user_id INTEGER;
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_users_infra_hub_user_id
+            ON users (infra_hub_user_id)
+            WHERE infra_hub_user_id IS NOT NULL;
+            """
+        )
+    )
+
+
 async def init_db() -> None:
     """Initialize database and required tables."""
     await ensure_database_exists()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _upgrade_user_hierarchy(conn)
         # Cleanup legacy table removed in retrieval-only mode.
         await conn.execute(text("DROP TABLE IF EXISTS token_usage"))
     logger.info("Database tables initialized")

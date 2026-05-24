@@ -3,8 +3,12 @@ import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2, Search, Ext
 import { Button, Input, Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { cn, formatRelativeTime, formatFileSize } from '@/lib/utils';
 import { adminApi, type AdminUserStats, type AdminSystemStats, type AdminDocument } from '@/lib/api';
+import { isInfraAdmin } from '@/lib/roles';
+import { useAuthStore } from '@/stores';
 
 export function AdminPage() {
+  const { user: currentUser } = useAuthStore();
+  const canManageRoles = isInfraAdmin(currentUser?.role);
   const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'documents'>('overview');
   const [stats, setStats] = useState<AdminSystemStats | null>(null);
   const [userStats, setUserStats] = useState<AdminUserStats[]>([]);
@@ -167,7 +171,8 @@ export function AdminPage() {
                     <p className="text-sm text-muted-foreground">Total Users</p>
                     <p className="text-3xl font-bold">{stats.users.total}</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      {stats.users.admins} admins, {stats.users.regular} users
+                      {stats.users.infra_admins ?? 0} infra, {stats.users.admins} admins,{' '}
+                      {stats.users.regular} users
                     </p>
                   </div>
                   <div className="p-3 rounded-xl bg-blue-500/10">
@@ -280,9 +285,10 @@ export function AdminPage() {
                       value={newUserRole}
                       onChange={(e) => setNewUserRole(e.target.value as 'USER' | 'ADMIN')}
                       className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm"
+                      disabled={!canManageRoles}
                     >
                       <option value="USER">Regular User</option>
-                      <option value="ADMIN">Administrator</option>
+                      {canManageRoles && <option value="ADMIN">Administrator</option>}
                     </select>
                   </div>
                   <Button type="submit" disabled={creating} className="w-full">
@@ -318,7 +324,16 @@ export function AdminPage() {
                         </td>
                       </tr>
                     ) : (
-                      userStats.map((user) => (
+                      userStats.map((user) => {
+                        const isTargetInfra = user.role === 'INFRA_ADMIN';
+                        const isTargetAdmin = user.role === 'ADMIN';
+                        const canEditRole =
+                          canManageRoles && !isTargetInfra;
+                        const canDelete =
+                          !isTargetInfra &&
+                          (canManageRoles || user.role === 'USER');
+
+                        return (
                         <tr key={user.user_id} className="hover:bg-secondary/30 transition-colors">
                           <td className="p-4">
                             <div className="flex items-center gap-3">
@@ -329,19 +344,32 @@ export function AdminPage() {
                             </div>
                           </td>
                           <td className="p-4">
-                            <select
-                              value={user.role}
-                              onChange={(e) => handleChangeRole(user.user_id, e.target.value)}
-                              className={cn(
-                                'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider',
-                                user.role === 'ADMIN'
-                                  ? 'bg-primary/10 text-primary border border-primary/20'
-                                  : 'bg-secondary text-muted-foreground border border-border'
-                              )}
-                            >
-                              <option value="USER">User</option>
-                              <option value="ADMIN">Admin</option>
-                            </select>
+                            {canEditRole ? (
+                              <select
+                                value={user.role}
+                                onChange={(e) => handleChangeRole(user.user_id, e.target.value)}
+                                className={cn(
+                                  'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider',
+                                  user.role === 'ADMIN'
+                                    ? 'bg-primary/10 text-primary border border-primary/20'
+                                    : 'bg-secondary text-muted-foreground border border-border'
+                                )}
+                              >
+                                <option value="USER">User</option>
+                                <option value="ADMIN">Admin</option>
+                              </select>
+                            ) : (
+                              <span
+                                className={cn(
+                                  'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider',
+                                  isTargetInfra && 'bg-violet-500/10 text-violet-600 border border-violet-500/20',
+                                  isTargetAdmin && 'bg-primary/10 text-primary border border-primary/20',
+                                  user.role === 'USER' && 'bg-secondary text-muted-foreground border border-border'
+                                )}
+                              >
+                                {user.role === 'INFRA_ADMIN' ? 'Infra Admin' : user.role === 'ADMIN' ? 'Admin' : 'User'}
+                              </span>
+                            )}
                           </td>
                           <td className="p-4 font-mono">{user.project_count}</td>
                           <td className="p-4 font-mono">{user.document_count}</td>
@@ -349,17 +377,20 @@ export function AdminPage() {
                             {formatRelativeTime(user.created_at)}
                           </td>
                           <td className="p-4 text-right">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-destructive hover:bg-destructive/10"
-                              onClick={() => handleDeleteUser(user.user_id, user.email)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            {canDelete && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                                onClick={() => handleDeleteUser(user.user_id, user.email)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

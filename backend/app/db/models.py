@@ -20,8 +20,9 @@ if TYPE_CHECKING:
 
 
 class UserRole(str, enum.Enum):
-    """User role enumeration."""
+    """INFRA_ADMIN: main_db.users (infra-hub). ADMIN: FlexSearch-only. USER: standard."""
 
+    INFRA_ADMIN = "INFRA_ADMIN"
     ADMIN = "ADMIN"
     USER = "USER"
 
@@ -59,6 +60,11 @@ class User(Base):
         Enum(UserRole),
         default=UserRole.USER,
         nullable=False,
+    )
+    infra_hub_user_id: Mapped[int | None] = mapped_column(
+        nullable=True,
+        unique=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

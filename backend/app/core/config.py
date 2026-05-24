@@ -40,14 +40,30 @@ class Settings(BaseSettings):
         description="Full PostgreSQL connection URL (overrides individual components if provided)",
     )
 
+    # infra-hub main_db (read-only for admin auth; credentials never stored in FlexSearch)
+    infra_hub_postgres_db: str = Field(default="main_db")
+    infra_hub_postgres_url: Optional[str] = Field(default=None)
+
     @model_validator(mode="after")
-    def assemble_postgres_url(self) -> "Settings":
-        """Construct postgres_url if not provided explicitly."""
+    def assemble_postgres_urls(self) -> "Settings":
+        """Construct postgres_url and infra-hub URL (same host/credentials, main_db)."""
+        from sqlalchemy.engine import make_url
+
         if not self.postgres_url:
             self.postgres_url = (
                 f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@"
                 f"{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
             )
+
+        if not self.infra_hub_postgres_url:
+            # Use credentials from POSTGRES_URL when set (avoids POSTGRES_PASSWORD drift).
+            base = make_url(self.postgres_url)
+            infra = base.set(database=self.infra_hub_postgres_db)
+            driver = infra.drivername.split("+", 1)[0]
+            self.infra_hub_postgres_url = infra.set(
+                drivername=driver
+            ).render_as_string(hide_password=False)
+
         return self
 
     # =========================================================================

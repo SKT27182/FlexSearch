@@ -11,10 +11,11 @@ import {
 } from '@/pages';
 
 import { useAuthStore } from '@/stores';
+import { hasAdminAccess } from '@/lib/roles';
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
-  if (user?.role !== 'ADMIN') {
+  if (!hasAdminAccess(user?.role)) {
     return <Navigate to="/" replace />;
   }
   return <>{children}</>;

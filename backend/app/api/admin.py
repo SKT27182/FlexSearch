@@ -1,7 +1,7 @@
 """
 FlexSearch Backend - Admin API Router
 
-Admin-only endpoints for user management, file management, and system overview.
+Hierarchy: INFRA_ADMIN (main_db) > ADMIN (FlexSearch-only) > USER
 """
 
 from datetime import datetime
@@ -13,7 +13,12 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_db, require_admin
+from app.core.dependencies import (
+    get_db,
+    is_infra_admin,
+    require_admin,
+    require_infra_admin,
+)
 from app.core.security import get_password_hash
 from app.db.models import Document, DocumentStatus, Project, User, UserRole
 from app.schemas.auth import UserResponse
@@ -24,9 +29,6 @@ from app.utils.logger import create_logger
 logger = create_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-# ============ Schemas ============
 
 
 class AdminCreateUser(BaseModel):
@@ -48,9 +50,6 @@ class UserStats(BaseModel):
     created_at: datetime
 
 
-# ============ User Management ============
-
-
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(
     _: Annotated[User, Depends(require_admin)],
@@ -58,7 +57,7 @@ async def list_users(
     skip: int = 0,
     limit: int = 100,
 ) -> list[User]:
-    """List all users (admin only)."""
+    """List all users (admin or infra-hub admin)."""
     result = await db.execute(
         select(User).offset(skip).limit(limit).order_by(User.created_at.desc())
     )
@@ -68,11 +67,16 @@ async def list_users(
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_data: AdminCreateUser,
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """Create a new user with specified role (admin only)."""
-    # Check if email already exists
+    """Create a new user. Only infra-hub admins may create ADMIN accounts."""
+    if user_data.role == "ADMIN" and not is_infra_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only infra-hub admins can create administrator accounts",
+        )
+
     result = await db.execute(select(User).where(User.email == user_data.email))
     if result.scalar_one_or_none():
         raise HTTPException(
@@ -84,6 +88,7 @@ async def create_user(
         email=user_data.email,
         hashed_password=get_password_hash(user_data.password),
         role=UserRole(user_data.role),
+        infra_hub_user_id=None,
     )
     db.add(user)
     await db.commit()
@@ -93,18 +98,18 @@ async def create_user(
     return user
 
 
-@router.patch("/users/{user_id}/role")
+@router.patch("/users/{user_id}/role", response_model=UserResponse)
 async def update_user_role(
     user_id: UUID,
-    role: str,
-    admin: Annotated[User, Depends(require_admin)],
+    role: UserRole,
+    _: Annotated[User, Depends(require_infra_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> UserResponse:
-    """Update a user's role (admin only)."""
-    if role not in ["ADMIN", "USER"]:
+) -> User:
+    """Infra-hub admins may promote/demote between USER and ADMIN only."""
+    if role not in (UserRole.USER, UserRole.ADMIN):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid role. Must be ADMIN or USER",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Can only assign USER or ADMIN roles",
         )
 
     result = await db.execute(select(User).where(User.id == user_id))
@@ -116,28 +121,27 @@ async def update_user_role(
             detail="User not found",
         )
 
-    # Prevent self-demotion
-    if user.id == admin.id and role == "USER":
+    if is_infra_admin(user):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot demote yourself",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot modify infra-hub admin accounts",
         )
 
-    user.role = UserRole(role)
+    user.role = role
     await db.commit()
     await db.refresh(user)
 
-    logger.info(f"User role updated: {user.email} -> {role}")
+    logger.info(f"User role updated: {user.email} -> {role.value}")
     return user
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: UUID,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Delete a user (admin only)."""
+    """Delete a user. Infra admins may delete ADMIN/USER; FlexSearch admins only USER."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
@@ -147,8 +151,19 @@ async def delete_user(
             detail="User not found",
         )
 
-    # Prevent self-deletion
-    if user.id == admin.id:
+    if is_infra_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot delete infra-hub admin accounts from FlexSearch",
+        )
+
+    if user.role == UserRole.ADMIN and not is_infra_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only infra-hub admins can delete administrator accounts",
+        )
+
+    if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete yourself",
@@ -160,9 +175,6 @@ async def delete_user(
     logger.info(f"User deleted: {user.email}")
 
 
-# ============ User-wise Statistics ============
-
-
 @router.get("/users/{user_id}/stats", response_model=UserStats)
 async def get_user_stats(
     user_id: UUID,
@@ -170,7 +182,6 @@ async def get_user_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserStats:
     """Get detailed statistics for a specific user."""
-    # Get user
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
@@ -180,14 +191,12 @@ async def get_user_stats(
             detail="User not found",
         )
 
-    # Get project count
     project_count = (
         await db.execute(
             select(func.count()).select_from(Project).where(Project.owner_id == user_id)
         )
     ).scalar() or 0
 
-    # Get document count
     document_count = (
         await db.execute(
             select(func.count())
@@ -222,7 +231,6 @@ async def get_all_user_stats(
 
     stats_list = []
     for user in users:
-        # Project count
         project_count = (
             await db.execute(
                 select(func.count())
@@ -231,7 +239,6 @@ async def get_all_user_stats(
             )
         ).scalar() or 0
 
-        # Document count
         document_count = (
             await db.execute(
                 select(func.count())
@@ -255,9 +262,6 @@ async def get_all_user_stats(
     return stats_list
 
 
-# ============ File Management ============
-
-
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_document(
     document_id: UUID,
@@ -274,7 +278,6 @@ async def admin_delete_document(
             detail="Document not found",
         )
 
-    # Delete from storage
     try:
         storage = get_storage_service()
         if document.storage_path:
@@ -282,14 +285,12 @@ async def admin_delete_document(
     except Exception as e:
         logger.warning(f"Failed to delete file from storage: {e}")
 
-    # Delete from vector store
     try:
         vector_store = get_vector_store()
         vector_store.delete_by_document(str(document_id))
     except Exception as e:
         logger.warning(f"Failed to delete vectors: {e}")
 
-    # Delete from database
     await db.delete(document)
     await db.commit()
 
@@ -345,9 +346,6 @@ async def list_all_documents(
     return documents
 
 
-# ============ System Statistics ============
-
-
 @router.get("/stats")
 async def get_system_stats(
     _: Annotated[User, Depends(require_admin)],
@@ -358,9 +356,23 @@ async def get_system_stats(
         await db.execute(select(func.count()).select_from(User))
     ).scalar() or 0
 
+    infra_admin_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(User)
+            .where(User.role == UserRole.INFRA_ADMIN)
+        )
+    ).scalar() or 0
+
     admin_count = (
         await db.execute(
             select(func.count()).select_from(User).where(User.role == UserRole.ADMIN)
+        )
+    ).scalar() or 0
+
+    regular_count = (
+        await db.execute(
+            select(func.count()).select_from(User).where(User.role == UserRole.USER)
         )
     ).scalar() or 0
 
@@ -372,7 +384,6 @@ async def get_system_stats(
         await db.execute(select(func.count()).select_from(Document))
     ).scalar() or 0
 
-    # Document status breakdown
     status_counts = await db.execute(
         select(Document.status, func.count(Document.id)).group_by(Document.status)
     )
@@ -381,8 +392,9 @@ async def get_system_stats(
     return {
         "users": {
             "total": user_count,
+            "infra_admins": infra_admin_count,
             "admins": admin_count,
-            "regular": user_count - admin_count,
+            "regular": regular_count,
         },
         "projects": project_count,
         "documents": {

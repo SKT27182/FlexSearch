@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Document, Project, User
+from app.services.project_access import has_admin_access, user_can_access_project, user_owns_project
 from app.schemas.project import (
     ProjectCreate,
     ProjectListResponse,
@@ -55,25 +56,18 @@ async def list_projects(
     skip: int = 0,
     limit: int = 100,
 ) -> ProjectListResponse:
-    """List all projects owned by the current user."""
-    # Get projects with document count
-    query = (
-        select(Project)
-        .where(Project.owner_id == current_user.id)
-        .offset(skip)
-        .limit(limit)
-        .order_by(Project.created_at.desc())
-    )
+    """List projects. Admins see all projects; regular users see their own."""
+    query = select(Project)
+    if not has_admin_access(current_user):
+        query = query.where(Project.owner_id == current_user.id)
+    query = query.offset(skip).limit(limit).order_by(Project.created_at.desc())
 
     result = await db.execute(query)
     projects = result.scalars().all()
 
-    # Get total count
-    count_query = (
-        select(func.count())
-        .select_from(Project)
-        .where(Project.owner_id == current_user.id)
-    )
+    count_query = select(func.count()).select_from(Project)
+    if not has_admin_access(current_user):
+        count_query = count_query.where(Project.owner_id == current_user.id)
     total = (await db.execute(count_query)).scalar() or 0
 
     # Get document counts for each project
@@ -117,8 +111,7 @@ async def get_project(
             detail="Project not found",
         )
 
-    # Check ownership
-    if project.owner_id != current_user.id:
+    if not user_can_access_project(current_user, project):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this project",
@@ -160,7 +153,7 @@ async def update_project(
             detail="Project not found",
         )
 
-    if project.owner_id != current_user.id:
+    if not user_owns_project(current_user, project):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to modify this project",
@@ -196,7 +189,7 @@ async def delete_project(
             detail="Project not found",
         )
 
-    if project.owner_id != current_user.id:
+    if not user_owns_project(current_user, project):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this project",

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Document, DocumentStatus, Project, User
+from app.services.project_access import user_can_access_project
 from app.schemas.document import (
     DocumentListResponse,
     DocumentResponse,
@@ -41,7 +42,7 @@ async def verify_project_access(
             detail="Project not found",
         )
 
-    if project.owner_id != current_user.id:
+    if not user_can_access_project(current_user, project):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this project",

@@ -51,10 +51,12 @@ export interface AuthTokens {
   token_type: string;
 }
 
+import type { UserRole } from './roles'
+
 export interface User {
   id: string;
   email: string;
-  role: 'ADMIN' | 'USER';
+  role: UserRole;
   created_at: string;
   updated_at: string;
 }
@@ -217,7 +219,12 @@ export interface AdminUserStats {
 }
 
 export interface AdminSystemStats {
-  users: { total: number; admins: number; regular: number };
+  users: {
+    total: number
+    infra_admins?: number
+    admins: number
+    regular: number
+  };
   projects: number;
   documents: { total: number; by_status: Record<string, number> };
 }
