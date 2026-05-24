@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install dev-local dev up down clean clean-all prepare-logs stop-local logs logs-local \
+.PHONY: help install dev-local dev up down clean clean-all clean-hard print-urls prepare-logs stop-local logs logs-local \
 	build test test-cov lint format db-migrate db-revision db-shell redis-cli
 
 CYAN := \033[36m
@@ -13,6 +13,14 @@ BACKEND_LOG := $(LOG_DIR)/backend.log
 FRONTEND_LOG := $(LOG_DIR)/frontend.log
 BACKEND_PID := $(LOG_DIR)/backend.pid
 FRONTEND_PID := $(LOG_DIR)/frontend.pid
+BACKEND_ENV_FILE := $(if $(wildcard backend/.env),backend/.env,backend/.env.example)
+FRONTEND_ENV_FILE := $(if $(wildcard frontend/.env),frontend/.env,frontend/.env.example)
+APP_HOST_RAW := $(shell awk -F= '/^SERVICE_PUBLIC_HOST=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2); print $$2; exit}' $(BACKEND_ENV_FILE) 2>/dev/null)
+APP_HOST := $(if $(APP_HOST_RAW),$(APP_HOST_RAW),127.0.0.1)
+BACKEND_PORT_RAW := $(shell awk -F= '/^API_PORT=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2); print $$2; exit}' $(BACKEND_ENV_FILE) 2>/dev/null)
+BACKEND_PORT := $(if $(BACKEND_PORT_RAW),$(BACKEND_PORT_RAW),8889)
+FRONTEND_PORT_RAW := $(shell awk -F= '/^VITE_PORT=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2); print $$2; exit}' $(FRONTEND_ENV_FILE) 2>/dev/null)
+FRONTEND_PORT := $(if $(FRONTEND_PORT_RAW),$(FRONTEND_PORT_RAW),5144)
 
 help: ## Show this help
 	@echo "FlexSearch - Available commands:"
@@ -30,17 +38,19 @@ prepare-logs:
 dev-local: install prepare-logs ## Run backend + frontend locally (no Docker), with log files
 	@echo "backend log:  $(BACKEND_LOG)"
 	@echo "frontend log: $(FRONTEND_LOG)"
+	@$(MAKE) --no-print-directory print-urls
 	@bash -c 'set -euo pipefail; \
 		trap '"'"'kill $$backend_pid $$frontend_pid 2>/dev/null || true; rm -f "$(BACKEND_PID)" "$(FRONTEND_PID)"'"'"' INT TERM EXIT; \
 		( set -a; [ -f backend/.env ] && source backend/.env; set +a; \
 		  PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
-		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-8889}" --app-dir backend \
+		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-$(BACKEND_PORT)}" --app-dir backend \
 		) >> "$(BACKEND_LOG)" 2>&1 & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
 		( cd frontend && pnpm run dev ) >> "$(FRONTEND_LOG)" 2>&1 & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
 		wait $$backend_pid $$frontend_pid'
 
 up: ## Start app containers in Docker
 	docker compose up -d --build
+	@$(MAKE) --no-print-directory print-urls
 
 dev: up ## Run with Docker
 
@@ -93,3 +103,11 @@ clean: stop-local ## Clean local artifacts and pid files
 clean-all: clean ## Remove logs and Docker resources (including volumes)
 	rm -f "$(BACKEND_LOG)" "$(FRONTEND_LOG)"
 	docker compose down -v --remove-orphans
+
+clean-hard: stop-local ## Force cleanup: stop/remove containers, networks, volumes, and local logs
+	rm -f "$(BACKEND_LOG)" "$(FRONTEND_LOG)"
+	docker compose down --volumes --remove-orphans --rmi local
+
+print-urls: ## Print frontend/backend URLs from env-configured ports
+	@echo "Backend URL:  http://$(APP_HOST):$(BACKEND_PORT)"
+	@echo "Frontend URL: http://$(APP_HOST):$(FRONTEND_PORT)"
