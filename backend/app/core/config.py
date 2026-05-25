@@ -7,6 +7,7 @@ from this file - never use os.getenv() directly elsewhere.
 
 import json
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -192,6 +193,14 @@ class Settings(BaseSettings):
         default=8889,
         description="Backend API port",
     )
+    app_public_url: Optional[str] = Field(
+        default=None,
+        description="Public HTTPS URL for this app (added to CORS automatically)",
+    )
+    app_public_host: Optional[str] = Field(
+        default=None,
+        description="Public hostname for generated links (overrides SERVICE_PUBLIC_HOST)",
+    )
     service_public_host: str = Field(
         default="localhost",
         description="Public host used in generated service links",
@@ -215,18 +224,35 @@ class Settings(BaseSettings):
         description="Logging level",
     )
 
+    @model_validator(mode="after")
+    def apply_public_app_settings(self) -> "Settings":
+        if self.app_public_host:
+            self.service_public_host = self.app_public_host
+        elif self.app_public_url:
+            hostname = urlparse(self.app_public_url).hostname
+            if hostname:
+                self.service_public_host = hostname
+        return self
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS_ORIGINS from comma-separated text or JSON array."""
         raw = self.cors_origins.strip()
         if not raw:
-            return []
-        if raw.startswith("["):
+            origins: list[str] = []
+        elif raw.startswith("["):
             parsed = json.loads(raw)
             if not isinstance(parsed, list):
                 raise ValueError("CORS_ORIGINS JSON value must be a list")
-            return [str(item).strip() for item in parsed if str(item).strip()]
-        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+            origins = [str(item).strip() for item in parsed if str(item).strip()]
+        else:
+            origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+        if self.app_public_url:
+            public_origin = self.app_public_url.rstrip("/")
+            if public_origin not in origins:
+                origins.append(public_origin)
+        return origins
 
     @property
     def qdrant_public_url(self) -> str:

@@ -3,15 +3,23 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+function resolveAllowedHosts(env: Record<string, string>): string[] {
+  const hosts = new Set(['localhost', '127.0.0.1'])
+  const publicHost = env.VITE_APP_PUBLIC_HOST?.trim()
+  if (publicHost) hosts.add(publicHost)
+  for (const part of (env.VITE_ALLOWED_HOSTS ?? '').split(',')) {
+    const host = part.trim()
+    if (host) hosts.add(host)
+  }
+  return [...hosts]
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, '')
   const vitePort = Number(env.VITE_PORT || '5144')
   const apiTarget = env.VITE_DEV_API_TARGET || 'http://localhost:8889'
-  const allowedHosts = (env.VITE_ALLOWED_HOSTS || 'localhost,127.0.0.1,flexsearch.skt27182.com')
-    .split(',')
-    .map((h) => h.trim())
-    .filter(Boolean)
+  const allowedHosts = resolveAllowedHosts(env)
 
   return {
     plugins: [react(), tailwindcss()],
