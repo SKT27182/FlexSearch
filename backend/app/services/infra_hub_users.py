@@ -17,6 +17,7 @@ class InfraHubUser:
 
     id: int
     email: str
+    name: str
     hashed_password: str
     is_active: bool
 
@@ -28,7 +29,7 @@ async def get_infra_hub_user_by_email(email: str) -> InfraHubUser | None:
         try:
             row = await conn.fetchrow(
                 """
-                SELECT id, email, hashed_password, is_active
+                SELECT id, email, name, hashed_password, is_active
                 FROM users
                 WHERE email = $1
                 """,
@@ -36,15 +37,17 @@ async def get_infra_hub_user_by_email(email: str) -> InfraHubUser | None:
             )
         finally:
             await conn.close()
-    except Exception as exc:
-        logger.error(f"Failed to query infra-hub users: {exc}")
+    except Exception:
+        logger.exception("Failed to query infra-hub users")
         return None
 
     if row is None:
         return None
+    name = row["name"] or row["email"].split("@", 1)[0]
     return InfraHubUser(
         id=row["id"],
         email=row["email"],
+        name=name,
         hashed_password=row["hashed_password"],
         is_active=row["is_active"],
     )

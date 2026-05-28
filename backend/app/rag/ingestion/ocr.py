@@ -135,8 +135,8 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
                 for img in pdf_images:
                     ocr_text = pytesseract.image_to_string(img)
                     all_text.append(ocr_text)
-            except Exception as ocr_error:
-                logger.error(f"OCR extraction also failed: {ocr_error}")
+            except Exception:
+                logger.exception("OCR extraction failed")
                 raise
 
         return ExtractedContent(

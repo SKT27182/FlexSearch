@@ -1,135 +1,148 @@
-import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
-import { Zap } from 'lucide-react';
-import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui';
-import { useAuthStore } from '@/stores';
+import { useState } from 'react'
+import { useNavigate, Link } from 'react-router-dom'
+import { Zap } from 'lucide-react'
+import { Button, Input } from '@/components/ui'
+import {
+  AuthLoginLayout,
+  AuthLoginCardHeader,
+  CardContent,
+  CardFooter,
+} from '@/components/AuthLoginLayout'
+import { useAuthStore } from '@/stores'
+import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 
 export function RegisterPage() {
-  const navigate = useNavigate();
-  const { register, isLoading } = useAuthStore();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [error, setError] = useState('');
+  useDocumentTitle('FlexSearch — Register')
+  const navigate = useNavigate()
+  const { register, isLoading } = useAuthStore()
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState('')
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
+    e.preventDefault()
+    setError('')
 
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
-      return;
+      setError('Passwords do not match')
+      return
     }
 
     if (password.length < 8) {
-      setError('Password must be at least 8 characters');
-      return;
+      setError('Password must be at least 8 characters')
+      return
     }
 
     try {
-      await register(email, password);
-      navigate('/');
+      await register(email, name.trim(), password)
+      navigate('/')
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Registration failed';
-      setError(message);
+      const detail =
+        err &&
+        typeof err === 'object' &&
+        'response' in err &&
+        (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      setError(
+        typeof detail === 'string'
+          ? detail
+          : err instanceof Error
+            ? err.message
+            : 'Registration failed'
+      )
     }
-  };
+  }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-md animate-fade-in">
-        {/* Logo */}
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-accent shadow-lg shadow-primary/20">
-            <Zap className="h-8 w-8 text-primary-foreground" />
-          </div>
-          <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-              FlexSearch
-            </h1>
-            <p className="text-sm text-muted-foreground">RAG Platform</p>
-          </div>
-        </div>
-
-        <Card className="glass">
-          <CardHeader className="text-center">
-            <CardTitle>Create an account</CardTitle>
-            <CardDescription>Get started with FlexSearch today</CardDescription>
-          </CardHeader>
-
-          <form onSubmit={handleSubmit}>
-            <CardContent className="space-y-4">
-              {error && (
-                <div className="p-3 rounded-md bg-destructive/10 border border-destructive/20 text-destructive text-sm">
-                  {error}
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <label htmlFor="email" className="text-sm font-medium text-foreground">
-                  Email
-                </label>
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  autoComplete="email"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label htmlFor="password" className="text-sm font-medium text-foreground">
-                  Password
-                </label>
-                <Input
-                  id="password"
-                  type="password"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  autoComplete="new-password"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label htmlFor="confirm-password" className="text-sm font-medium text-foreground">
-                  Confirm Password
-                </label>
-                <Input
-                  id="confirm-password"
-                  type="password"
-                  placeholder="••••••••"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                  autoComplete="new-password"
-                />
-              </div>
-            </CardContent>
-
-            <CardFooter className="flex flex-col gap-4">
-              <Button type="submit" className="w-full" isLoading={isLoading}>
-                Create account
-              </Button>
-
-              <p className="text-sm text-muted-foreground text-center">
-                Already have an account?{' '}
-                <Link to="/login" className="text-primary hover:underline font-medium">
-                  Sign in
-                </Link>
-              </p>
-            </CardFooter>
-          </form>
-        </Card>
-
-        <p className="text-xs text-muted-foreground text-center mt-4">
-          The first user registered will be assigned the Admin role.
+    <AuthLoginLayout
+      productName="FlexSearch"
+      tagline="RAG Platform"
+      icon={<Zap className="h-8 w-8 text-primary-foreground" />}
+      footer={
+        <p className="text-xs text-muted-foreground">
+          The first registered user becomes an Admin.
         </p>
-      </div>
-    </div>
-  );
+      }
+    >
+      <AuthLoginCardHeader
+        title="Create an account"
+        description="Get started with FlexSearch today"
+      />
+      <form onSubmit={handleSubmit}>
+        <CardContent className="space-y-4">
+          {error && (
+            <div className="p-3 rounded-md bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              {error}
+            </div>
+          )}
+          <div className="space-y-2">
+            <label htmlFor="name" className="text-sm font-medium">
+              Name
+            </label>
+            <Input
+              id="name"
+              type="text"
+              placeholder="Your name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              autoComplete="name"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="email" className="text-sm font-medium">
+              Email
+            </label>
+            <Input
+              id="email"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoComplete="email"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="password" className="text-sm font-medium">
+              Password
+            </label>
+            <Input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="confirm-password" className="text-sm font-medium">
+              Confirm password
+            </label>
+            <Input
+              id="confirm-password"
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              autoComplete="new-password"
+            />
+          </div>
+        </CardContent>
+        <CardFooter className="flex flex-col gap-4">
+          <Button type="submit" className="w-full" isLoading={isLoading}>
+            Create account
+          </Button>
+          <p className="text-sm text-muted-foreground text-center">
+            Already have an account?{' '}
+            <Link to="/login" className="text-primary hover:underline font-medium">
+              Sign in
+            </Link>
+          </p>
+        </CardFooter>
+      </form>
+    </AuthLoginLayout>
+  )
 }

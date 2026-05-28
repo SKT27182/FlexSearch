@@ -20,9 +20,10 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectUpdate,
 )
+from app.core.config import settings
 from app.utils.logger import create_logger
 
-logger = create_logger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -112,6 +113,11 @@ async def get_project(
         )
 
     if not user_can_access_project(current_user, project):
+        logger.warning(
+            "Project access denied: project=%s user=%s",
+            project_id,
+            current_user.email,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this project",

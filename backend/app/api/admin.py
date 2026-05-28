@@ -39,6 +39,12 @@ class AdminCreateUser(BaseModel):
     role: str = Field(default="USER", pattern="^(ADMIN|USER)$")
 
 
+class AdminUpdateUser(BaseModel):
+    """Schema for admin updating a user."""
+
+    password: str | None = Field(default=None, min_length=8)
+
+
 class UserStats(BaseModel):
     """User-wise statistics."""
 
@@ -95,6 +101,30 @@ async def create_user(
     await db.refresh(user)
 
     logger.info(f"Admin created user: {user.email} with role {user.role}")
+    return user
+
+
+@router.patch("/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: UUID,
+    body: AdminUpdateUser,
+    _: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Reset password for a user (admin or infra admin)."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if is_infra_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot modify infra-hub admin accounts",
+        )
+    if body.password:
+        user.hashed_password = get_password_hash(body.password)
+        await db.commit()
+        await db.refresh(user)
     return user
 
 

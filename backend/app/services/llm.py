@@ -13,7 +13,7 @@ from litellm import acompletion
 from app.core.config import settings
 from app.utils.logger import create_logger
 
-logger = create_logger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 # Configure LiteLLM
 litellm.set_verbose = settings.debug
@@ -78,6 +78,11 @@ class LLMService:
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
+            logger.verbose(
+                "LLM completion: model=%s latency_ms=%d",
+                self._model,
+                latency_ms,
+            )
 
             return LLMResponse(
                 content=response.choices[0].message.content or "",
@@ -87,8 +92,8 @@ class LLMService:
                 provider=self._provider,
                 latency_ms=latency_ms,
             )
-        except Exception as e:
-            logger.error(f"LLM completion failed: {e}")
+        except Exception:
+            logger.exception("LLM completion failed")
             raise
 
     @property

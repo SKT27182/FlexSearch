@@ -11,7 +11,7 @@ async def create_user_and_login(client: AsyncClient, email: str = "test@example.
     """Helper to create user and get token."""
     await client.post(
         "/api/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "name": "Test User", "password": "password123"},
     )
     response = await client.post(
         "/api/auth/login",

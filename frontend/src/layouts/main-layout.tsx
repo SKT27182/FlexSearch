@@ -1,34 +1,64 @@
-import { useEffect } from 'react';
-import { Navigate, Outlet, Link, useLocation } from 'react-router-dom';
-import { Zap, LayoutDashboard, FolderOpen, Settings, LogOut, Shield, Loader2 } from 'lucide-react';
-import { useAuthStore, useProjectStore } from '@/stores';
-import { cn } from '@/lib/utils';
-import { hasAdminAccess } from '@/lib/roles';
-import { Button } from '@/components/ui';
+import { useEffect, useState } from 'react'
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { Menu, Loader2 } from 'lucide-react'
+import { useAuthStore, useProjectStore } from '@/stores'
+import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/hooks/useDocumentTitle'
+import { Button } from '@/components/ui'
+import { AppSidebar } from '@/components/layout/AppSidebar'
 
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/projects', icon: FolderOpen, label: 'Projects' },
-];
+const SIDEBAR_COLLAPSED_KEY = 'flexsearch-sidebar-collapsed'
 
 export function MainLayout() {
-  const { user, isInitialized, isLoading, loadUser, logout } = useAuthStore();
-  const { fetchProjects } = useProjectStore();
-  const location = useLocation();
+  const { user, isInitialized, isLoading, loadUser, logout } = useAuthStore()
+  const { fetchProjects } = useProjectStore()
+  const location = useLocation()
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'
+    } catch {
+      return false
+    }
+  })
 
-  const isAuthenticated = user !== null;
+  const titleMap: Record<string, string> = {
+    '/': 'Dashboard — FlexSearch',
+    '/projects': 'Projects — FlexSearch',
+    '/settings': 'Settings — FlexSearch',
+    '/admin': 'Admin — FlexSearch',
+  }
+  const pageTitle =
+    titleMap[location.pathname] ??
+    (location.pathname.startsWith('/projects/')
+      ? 'Project — FlexSearch'
+      : 'FlexSearch')
+  useDocumentTitle(pageTitle)
+
+  const isAuthenticated = user !== null
 
   useEffect(() => {
-    loadUser();
-  }, [loadUser]);
+    loadUser()
+  }, [loadUser])
 
   useEffect(() => {
     if (isAuthenticated) {
-      fetchProjects();
+      fetchProjects()
     }
-  }, [isAuthenticated, fetchProjects]);
+  }, [isAuthenticated, fetchProjects])
 
-  // Show loading spinner while checking auth
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed))
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarCollapsed])
+
+  useEffect(() => {
+    setIsSidebarOpen(false)
+  }, [location.pathname])
+
   if (!isInitialized || isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -37,100 +67,73 @@ export function MainLayout() {
           <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
-    );
+    )
   }
 
-  // Redirect to login if not authenticated
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login" replace />
   }
+
+  const closeMobileSidebar = () => setIsSidebarOpen(false)
 
   return (
-    <div className="min-h-screen flex bg-background">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-border bg-card flex flex-col">
-        {/* Logo */}
-        <div className="p-4 border-b border-border">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-gradient-to-br from-primary to-accent">
-              <Zap className="h-5 w-5 text-primary-foreground" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold">FlexSearch</h1>
-              <p className="text-xs text-muted-foreground">RAG Platform</p>
-            </div>
-          </div>
-        </div>
+    <div className="flex h-screen overflow-hidden bg-background">
+      <header className="fixed top-0 left-0 right-0 z-50 flex h-14 items-center border-b bg-card px-4 md:hidden">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setIsSidebarOpen(true)}
+          className="mr-2"
+          aria-label="Open menu"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <div className="font-semibold">FlexSearch</div>
+      </header>
 
-        {/* Navigation */}
-        <nav className="flex-1 p-4 space-y-1">
-          {navItems.map(({ to, icon: Icon, label }) => {
-            const isActive = location.pathname === to || 
-              (to !== '/' && location.pathname.startsWith(to));
-            return (
-              <Link
-                key={to}
-                to={to}
-                className={cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-primary/10 text-primary'
-                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                )}
-              >
-                <Icon className="h-5 w-5" />
-                {label}
-              </Link>
-            );
-          })}
+      <div
+        className={cn(
+          'fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity md:hidden',
+          isSidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
+        )}
+        onClick={closeMobileSidebar}
+        aria-hidden={!isSidebarOpen}
+      />
 
-          {hasAdminAccess(user?.role) && (
-            <Link
-              to="/admin"
-              className={cn(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                location.pathname.startsWith('/admin')
-                  ? 'bg-primary/10 text-primary'
-                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-              )}
-            >
-              <Shield className="h-5 w-5" />
-              Admin
-            </Link>
-          )}
-        </nav>
+      <AppSidebar
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-300 ease-in-out md:hidden',
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        )}
+        collapsed={false}
+        userName={user?.name}
+        userEmail={user?.email}
+        userRole={user?.role}
+        onLogout={logout}
+        onNavigate={closeMobileSidebar}
+      />
 
-        {/* User section */}
-        <div className="p-4 border-t border-border">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-accent flex items-center justify-center text-primary-foreground font-medium">
-              {user?.email?.[0].toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{user?.email}</p>
-              <p className="text-xs text-muted-foreground capitalize">{user?.role?.toLowerCase()}</p>
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <Link
-              to="/settings"
-              className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-            >
-              <Settings className="h-4 w-4" />
-              Settings
-            </Link>
-            <Button variant="ghost" size="icon" onClick={logout}>
-              <LogOut className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
+      <aside
+        className={cn(
+          'hidden md:flex shrink-0 h-full transition-[width] duration-300 ease-in-out overflow-hidden',
+          sidebarCollapsed ? 'w-[4.5rem]' : 'w-64'
+        )}
+      >
+        <AppSidebar
+          className="w-full"
+          collapsed={sidebarCollapsed}
+          showCollapseToggle
+          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+          userName={user?.name}
+          userEmail={user?.email}
+          userRole={user?.role}
+          onLogout={logout}
+        />
       </aside>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0">
         <Outlet />
       </main>
     </div>
-  );
+  )
 }

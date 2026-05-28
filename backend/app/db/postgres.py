@@ -18,7 +18,7 @@ from sqlalchemy.sql import text
 
 from app.core.config import settings
 
-logger = create_logger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 # Create async engine
 engine = create_async_engine(
@@ -55,6 +55,35 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+async def _upgrade_user_name(conn) -> None:
+    """Add name column and backfill from email local-part."""
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS name VARCHAR(255);
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            UPDATE users
+            SET name = split_part(email, '@', 1)
+            WHERE name IS NULL OR name = '';
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE users
+            ALTER COLUMN name SET NOT NULL;
+            """
+        )
+    )
 
 
 async def _upgrade_user_hierarchy(conn) -> None:
@@ -101,6 +130,7 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _upgrade_user_hierarchy(conn)
+        await _upgrade_user_name(conn)
         # Cleanup legacy table removed in retrieval-only mode.
         await conn.execute(text("DROP TABLE IF EXISTS token_usage"))
     logger.info("Database tables initialized")
