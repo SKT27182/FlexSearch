@@ -68,6 +68,12 @@ async def upload_document(
     Supported formats: PDF, TXT, MD, images (PNG, JPG, JPEG).
     """
     await verify_project_access(project_id, current_user, db)
+    logger.info(
+        "Document upload started: project=%s file=%s user=%s",
+        project_id,
+        file.filename,
+        current_user.email,
+    )
 
     # Validate file type
     allowed_types = {

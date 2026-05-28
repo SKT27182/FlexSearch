@@ -5,6 +5,7 @@ import { useProjectStore } from '@/stores';
 import { Button, Card, CardHeader, CardTitle, CardContent, buttonVariants, Input } from '@/components/ui';
 import { cn, formatFileSize } from '@/lib/utils';
 import { documentsApi, projectsApi, retrievalApi, type Document, type Project, type RetrievedChunk } from '@/lib/api';
+import { ResizableShell } from '@/components/ResizableShell';
 
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -199,8 +200,9 @@ export function ProjectDetailPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-1 space-y-8">
+      <ResizableShell
+        left={
+        <div className="space-y-8">
           {/* Upload Area */}
           <Card
             className={cn(
@@ -286,8 +288,9 @@ export function ProjectDetailPage() {
             </CardContent>
           </Card>
         </div>
-
-        <div className="lg:col-span-2 space-y-8">
+        }
+        main={
+        <div className="space-y-8">
           {/* Query Section */}
           <Card className="shadow-md">
             <CardHeader>
@@ -362,7 +365,8 @@ export function ProjectDetailPage() {
             </CardContent>
           </Card>
         </div>
-      </div>
+        }
+      />
     </div>
   );
 }

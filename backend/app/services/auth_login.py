@@ -27,6 +27,7 @@ async def get_or_create_infra_linked_user(
     if user is None:
         user = User(
             email=infra_user.email,
+            name=infra_user.name,
             hashed_password=_UNUSABLE_PASSWORD_HASH,
             role=UserRole.INFRA_ADMIN,
             infra_hub_user_id=infra_user.id,
@@ -39,6 +40,7 @@ async def get_or_create_infra_linked_user(
 
     user.role = UserRole.INFRA_ADMIN
     user.infra_hub_user_id = infra_user.id
+    user.name = infra_user.name
     await db.commit()
     await db.refresh(user)
     return user
@@ -56,6 +58,7 @@ async def authenticate_user(
     """
     infra_user = await verify_infra_hub_credentials(email, password)
     if infra_user is not None:
+        logger.debug("Authenticated via infra-hub for %s", email)
         return await get_or_create_infra_linked_user(db, infra_user)
 
     result = await db.execute(select(User).where(User.email == email))
@@ -68,5 +71,7 @@ async def authenticate_user(
         return None
 
     if not verify_password(password, local_user.hashed_password):
+        logger.debug("Local auth failed for %s", email)
         return None
+    logger.debug("Authenticated via FlexSearch-local for %s", email)
     return local_user

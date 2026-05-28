@@ -3,7 +3,7 @@ import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2, Search, Ext
 import { Button, Input, Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { cn, formatRelativeTime, formatFileSize } from '@/lib/utils';
 import { adminApi, type AdminUserStats, type AdminSystemStats, type AdminDocument } from '@/lib/api';
-import { isInfraAdmin } from '@/lib/roles';
+import { isInfraAdmin, canDeleteUser } from '@/lib/roles';
 import { useAuthStore } from '@/stores';
 
 export function AdminPage() {
@@ -24,6 +24,7 @@ export function AdminPage() {
 
   // Document search/filter
   const [docSearch, setDocSearch] = useState('');
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
     loadData();
@@ -64,8 +65,12 @@ export function AdminPage() {
       setNewUserPassword('');
       setShowCreateUser(false);
       loadData();
-    } catch (error) {
-      console.error('Failed to create user:', error);
+    } catch (error: unknown) {
+      const msg =
+        error && typeof error === 'object' && 'response' in error
+          ? (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null;
+      setActionError(msg || 'Failed to create user');
     } finally {
       setCreating(false);
     }
@@ -77,8 +82,12 @@ export function AdminPage() {
     try {
       await adminApi.deleteUser(userId);
       loadData();
-    } catch (error) {
-      console.error('Failed to delete user:', error);
+    } catch (error: unknown) {
+      const msg =
+        error && typeof error === 'object' && 'response' in error
+          ? (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null;
+      setActionError(msg || 'Failed to delete user');
     }
   };
 
@@ -86,8 +95,12 @@ export function AdminPage() {
     try {
       await adminApi.updateUserRole(userId, newRole);
       loadData();
-    } catch (error) {
-      console.error('Failed to update role:', error);
+    } catch (error: unknown) {
+      const msg =
+        error && typeof error === 'object' && 'response' in error
+          ? (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null;
+      setActionError(msg || 'Failed to update role');
     }
   };
 
@@ -140,6 +153,12 @@ export function AdminPage() {
           <p className="text-muted-foreground">System management and global overview</p>
         </div>
       </div>
+
+      {actionError && (
+        <div className="mb-4 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {actionError}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-2 mb-8 border-b border-border pb-2">
@@ -329,9 +348,7 @@ export function AdminPage() {
                         const isTargetAdmin = user.role === 'ADMIN';
                         const canEditRole =
                           canManageRoles && !isTargetInfra;
-                        const canDelete =
-                          !isTargetInfra &&
-                          (canManageRoles || user.role === 'USER');
+                        const canDelete = canDeleteUser(currentUser?.role, user.role);
 
                         return (
                         <tr key={user.user_id} className="hover:bg-secondary/30 transition-colors">

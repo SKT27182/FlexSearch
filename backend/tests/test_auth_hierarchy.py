@@ -16,6 +16,7 @@ async def test_authenticate_infra_hub_user_creates_linked_row():
     infra = InfraHubUser(
         id=1,
         email="admin@infra.local",
+        name="ADMIN",
         hashed_password="hash",
         is_active=True,
     )
@@ -38,6 +39,7 @@ async def test_infra_linked_user_cannot_use_local_password():
     db = AsyncMock()
     local = User(
         email="admin@infra.local",
+        name="ADMIN",
         hashed_password="local-hash",
         role=UserRole.INFRA_ADMIN,
         infra_hub_user_id=1,
@@ -61,6 +63,7 @@ async def test_get_or_create_updates_existing_to_infra_admin():
     db = AsyncMock()
     existing = User(
         email="admin@infra.local",
+        name="Admin",
         hashed_password="x",
         role=UserRole.USER,
         infra_hub_user_id=None,
@@ -69,6 +72,7 @@ async def test_get_or_create_updates_existing_to_infra_admin():
     infra = InfraHubUser(
         id=42,
         email="admin@infra.local",
+        name="ADMIN",
         hashed_password="hash",
         is_active=True,
     )

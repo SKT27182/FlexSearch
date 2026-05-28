@@ -4,15 +4,17 @@ FlexSearch Backend - Auth Schemas
 Pydantic models for authentication endpoints.
 """
 
-from uuid import UUID
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class UserRegister(BaseModel):
     """User registration request."""
 
     email: EmailStr
+    name: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
 
 
@@ -38,13 +40,27 @@ class TokenPayload(BaseModel):
     exp: int
 
 
+class ProfileUpdate(BaseModel):
+    """Update display name only."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+
+class PasswordChange(BaseModel):
+    """Change password request."""
+
+    current_password: str
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 class UserResponse(BaseModel):
     """User response model."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     email: EmailStr
+    name: str
     role: str
     created_at: datetime
-
-    class Config:
-        from_attributes = True
+    updated_at: datetime

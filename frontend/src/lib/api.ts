@@ -42,6 +42,7 @@ export interface LoginCredentials {
 
 export interface RegisterData {
   email: string;
+  name: string;
   password: string;
 }
 
@@ -56,6 +57,7 @@ import type { UserRole } from './roles'
 export interface User {
   id: string;
   email: string;
+  name: string;
   role: UserRole;
   created_at: string;
   updated_at: string;
@@ -80,6 +82,21 @@ export const authApi = {
   getMe: async (): Promise<User> => {
     const { data } = await api.get<User>('/auth/me');
     return data;
+  },
+
+  updateProfile: async (name: string): Promise<User> => {
+    const { data } = await api.patch<User>('/auth/me/profile', { name });
+    return data;
+  },
+
+  changePassword: async (
+    currentPassword: string,
+    newPassword: string
+  ): Promise<void> => {
+    await api.post('/auth/me/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
   },
 
   refresh: async (refreshToken: string): Promise<AuthTokens> => {
@@ -253,8 +270,18 @@ export const adminApi = {
     return data;
   },
 
-  createUser: async (user: any): Promise<User> => {
+  listUsers: async (): Promise<User[]> => {
+    const { data } = await api.get<User[]>('/admin/users');
+    return data;
+  },
+
+  createUser: async (user: { email: string; password: string; role: string }): Promise<User> => {
     const { data } = await api.post<User>('/admin/users', user);
+    return data;
+  },
+
+  updateUserPassword: async (userId: string, password: string): Promise<User> => {
+    const { data } = await api.patch<User>(`/admin/users/${userId}`, { password });
     return data;
   },
 

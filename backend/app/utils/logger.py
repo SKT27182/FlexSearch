@@ -11,7 +11,7 @@ import json
 
 ################################################
 
-LOG_PATH = "/home/skt27182/logs"
+LOG_PATH = os.environ.get("LOG_PATH", os.path.join(os.getcwd(), "logs"))
 
 # Color mappings
 COLOUR_MAPPING = {

@@ -4,14 +4,14 @@ FlexSearch Backend - Cross-Encoder Reranking Strategy
 High-quality reranking using cross-encoder models.
 """
 
-import logging
-
 from sentence_transformers import CrossEncoder
 
+from app.core.config import settings
 from app.rag.reranking.base import BaseRerankingStrategy
 from app.rag.retrieval.base import RetrievalResult
+from app.utils.logger import create_logger
 
-logger = logging.getLogger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 # Default cross-encoder model
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"

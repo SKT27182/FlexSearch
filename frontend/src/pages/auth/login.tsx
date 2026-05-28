@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Zap } from 'lucide-react';
-import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui';
-import { useAuthStore } from '@/stores';
+import { Button, Input } from '@/components/ui';
+import { AuthLoginLayout, AuthLoginCardHeader, CardContent, CardFooter } from '@/components/AuthLoginLayout';
+import { useAuthStore } from '@/stores'
+import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 
 export function LoginPage() {
+  useDocumentTitle('FlexSearch — Sign in')
   const navigate = useNavigate();
   const { login, isLoading } = useAuthStore();
   const [email, setEmail] = useState('');
@@ -25,28 +28,16 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-md animate-fade-in">
-        {/* Logo */}
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-accent shadow-lg shadow-primary/20">
-            <Zap className="h-8 w-8 text-primary-foreground" />
-          </div>
-          <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-              FlexSearch
-            </h1>
-            <p className="text-sm text-muted-foreground">RAG Platform</p>
-          </div>
-        </div>
-
-        <Card className="glass">
-          <CardHeader className="text-center">
-            <CardTitle>Welcome back</CardTitle>
-            <CardDescription>Sign in to your account to continue</CardDescription>
-          </CardHeader>
-
-          <form onSubmit={handleSubmit}>
+    <AuthLoginLayout
+      productName="FlexSearch"
+      tagline="RAG Platform"
+      icon={<Zap className="h-8 w-8 text-primary-foreground" />}
+    >
+      <AuthLoginCardHeader
+        title="Welcome back"
+        description="Sign in to your account to continue"
+      />
+      <form onSubmit={handleSubmit}>
             <CardContent className="space-y-4">
               {error && (
                 <div className="p-3 rounded-md bg-destructive/10 border border-destructive/20 text-destructive text-sm">
@@ -97,9 +88,7 @@ export function LoginPage() {
                 </Link>
               </p>
             </CardFooter>
-          </form>
-        </Card>
-      </div>
-    </div>
+      </form>
+    </AuthLoginLayout>
   );
 }

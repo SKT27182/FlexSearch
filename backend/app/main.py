@@ -28,7 +28,7 @@ from app.core.security import verify_password
 from app.db.postgres import close_db, init_db
 from app.db.models import User
 
-logger = create_logger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 
 @asynccontextmanager

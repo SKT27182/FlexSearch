@@ -20,9 +20,10 @@ from app.schemas.retrieval import (
     RetrievalQueryRequest,
     RetrievalQueryResponse,
 )
+from app.core.config import settings
 from app.utils.logger import create_logger
 
-logger = create_logger(__name__)
+logger = create_logger(__name__, level=settings.log_level)
 
 router = APIRouter(prefix="/retrieval", tags=["retrieval"])
 
@@ -56,6 +57,12 @@ async def query_retrieval(
             detail="Not authorized to access this project",
         )
 
+    logger.verbose(
+        "Retrieval query: project=%s user=%s top_k=%d",
+        request.project_id,
+        current_user.email,
+        request.top_k,
+    )
     rag_pipeline = get_rag_pipeline()
     results = await rag_pipeline.retrieve(
         query=request.query,
