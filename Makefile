@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install dev-local dev up down clean clean-all clean-hard print-urls prepare-logs stop-local logs logs-local \
+.PHONY: help install dev-local dev up down clean clean-all clean-hard print-urls prepare-logs stop-local wait-db logs logs-local \
 	build test test-cov lint format db-migrate db-revision db-shell redis-cli
 
 CYAN := \033[36m
@@ -21,6 +21,9 @@ BACKEND_PORT_RAW := $(shell awk -F= '/^API_PORT=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2
 BACKEND_PORT := $(if $(BACKEND_PORT_RAW),$(BACKEND_PORT_RAW),8889)
 FRONTEND_PORT_RAW := $(shell awk -F= '/^VITE_PORT=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2); print $$2; exit}' $(FRONTEND_ENV_FILE) 2>/dev/null)
 FRONTEND_PORT := $(if $(FRONTEND_PORT_RAW),$(FRONTEND_PORT_RAW),5144)
+INFRA_HUB_DIR := ../infra-hub
+INFRA_HUB_PERSIST_DIR := $(INFRA_HUB_DIR)/volumes
+INFRA_POSTGRES_CONTAINER ?= infra-postgres
 
 help: ## Show this help
 	@echo "FlexSearch - Available commands:"
@@ -36,6 +39,8 @@ prepare-logs:
 	@: > "$(FRONTEND_LOG)"
 
 dev-local: install prepare-logs ## Run backend + frontend locally (no Docker), with log files
+	@$(MAKE) --no-print-directory stop-local
+	@$(MAKE) --no-print-directory wait-db
 	@echo "backend log:  $(BACKEND_LOG)"
 	@echo "frontend log: $(FRONTEND_LOG)"
 	@$(MAKE) --no-print-directory print-urls
@@ -57,6 +62,26 @@ dev: up ## Run with Docker
 stop-local: ## Stop locally started backend/frontend processes from pid files
 	@if [ -f "$(BACKEND_PID)" ]; then kill "$$(cat "$(BACKEND_PID)")" 2>/dev/null || true; rm -f "$(BACKEND_PID)"; fi
 	@if [ -f "$(FRONTEND_PID)" ]; then kill "$$(cat "$(FRONTEND_PID)")" 2>/dev/null || true; rm -f "$(FRONTEND_PID)"; fi
+	@for port in "$(BACKEND_PORT)" "$(FRONTEND_PORT)"; do \
+		pids="$$(ss -ltnp | awk -v p=":$$port$$" '$$4 ~ p {print}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"; \
+		if [ -n "$$pids" ]; then \
+			echo "Stopping processes on port $$port: $$pids"; \
+			kill $$pids 2>/dev/null || true; \
+		fi; \
+	done
+
+wait-db: ## Wait for shared infra postgres to become healthy
+	@echo "Waiting for shared PostgreSQL container to be healthy..."
+	@timeout 90 bash -c 'set -euo pipefail; \
+		container="$(INFRA_POSTGRES_CONTAINER)"; \
+		until docker inspect "$$container" >/dev/null 2>&1; do sleep 1; done; \
+		while true; do \
+			status=$$(docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" "$$container" 2>/dev/null || true); \
+			if [ "$$status" = "healthy" ] || [ "$$status" = "running" ]; then \
+				break; \
+			fi; \
+			sleep 1; \
+		done'
 
 down: stop-local ## Stop Docker app and local dev processes
 	docker compose down
@@ -82,8 +107,11 @@ lint: ## Lint backend code
 format: ## Format backend code
 	$(BACKEND_VENV)/ruff format backend/app/
 
-db-migrate: ## Run database migrations
+db-migrate: ## Run database migrations (idempotent; safe on existing DBs)
 	cd backend && .venv/bin/alembic -c alembic.ini upgrade head
+
+db-stamp: ## Mark DB as migrated without running SQL (schema already current via init_db)
+	cd backend && .venv/bin/alembic -c alembic.ini stamp head
 
 db-revision: ## Create new migration
 	@read -p "Migration message: " msg; \
@@ -107,6 +135,10 @@ clean-all: clean ## Remove logs and Docker resources (including volumes)
 clean-hard: stop-local ## Force cleanup: stop/remove containers, networks, volumes, and local logs
 	rm -f "$(BACKEND_LOG)" "$(FRONTEND_LOG)"
 	docker compose down --volumes --remove-orphans --rmi local
+	@if [ -f "$(INFRA_HUB_DIR)/docker-compose.yml" ]; then \
+		docker compose -f "$(INFRA_HUB_DIR)/docker-compose.yml" down --volumes --remove-orphans --rmi local; \
+	fi
+	@rm -rf "$(INFRA_HUB_PERSIST_DIR)"
 
 print-urls: ## Print frontend/backend URLs from env-configured ports
 	@echo "Backend URL:  http://$(APP_HOST):$(BACKEND_PORT)"

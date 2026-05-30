@@ -22,6 +22,23 @@ Important variables:
 - `POSTGRES_*`, `QDRANT_*`, `MINIO_*`: service connection values
 - `*_SERVICE_NAME`, `*_DISPLAY_NAME`, `*_CONTAINER_NAME`: service metadata
 
+## Database migrations
+
+From repository root:
+
+```bash
+make db-migrate
+```
+
+This applies Alembic revisions under `backend/alembic/versions/` (including `users.name`).
+Tables are also created/updated on app startup via `init_db()`.
+
+If the app already started successfully and the schema is current, stamp once so Alembic tracks head:
+
+```bash
+make db-stamp
+```
+
 ## Local run
 
 From repository root:

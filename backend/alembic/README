@@ -1,0 +1,9 @@
+FlexSearch Alembic migrations.
+
+- Fresh databases: tables are created on app startup via `init_db()` in `app/db/postgres.py`.
+- `make db-migrate` applies idempotent SQL revisions for existing databases (e.g. `users.name`).
+- If your schema is already up to date from a recent app start, stamp Alembic once:
+
+  ```bash
+  cd backend && .venv/bin/alembic -c alembic.ini stamp head
+  ```

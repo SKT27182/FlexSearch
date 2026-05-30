@@ -22,11 +22,11 @@ export function ResizableShell({
       id={storageKey}
       defaultLayout={{ left: 35, main: 65 }}
     >
-      <Panel id="left" defaultSize={35} minSize={25} maxSize={55} collapsible>
+      <Panel id="left" defaultSize="35%" minSize="25%" maxSize="55%" collapsible>
         <div className="h-full overflow-auto pr-2">{left}</div>
       </Panel>
       <Separator className="w-1 bg-border hover:bg-primary/20" />
-      <Panel id="main" minSize={35}>
+      <Panel id="main" minSize="35%">
         <div className="h-full overflow-auto pl-2">{main}</div>
       </Panel>
     </Group>
