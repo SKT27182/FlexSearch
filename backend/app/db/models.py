@@ -7,9 +7,9 @@ Database models for Users, Projects, and Documents.
 import enum
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,10 +28,14 @@ class UserRole(str, enum.Enum):
 
 
 class DocumentStatus(str, enum.Enum):
-    """Document processing status."""
+    """Document processing status pipeline."""
 
-    PENDING = "pending"
-    PROCESSING = "processing"
+    UPLOADED = "uploaded"
+    STORED = "stored"
+    EXTRACTING = "extracting"
+    EXTRACTED = "extracted"
+    CHUNKING = "chunking"
+    INDEXING = "indexing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -79,7 +83,6 @@ class User(Base):
         nullable=False,
     )
 
-    # Relationships
     projects: Mapped[list["Project"]] = relationship(
         "Project",
         back_populates="owner",
@@ -111,6 +114,11 @@ class Project(Base):
         nullable=False,
         index=True,
     )
+    rag_config: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -123,7 +131,6 @@ class Project(Base):
         nullable=False,
     )
 
-    # Relationships
     owner: Mapped["User"] = relationship(
         "User",
         back_populates="projects",
@@ -168,9 +175,17 @@ class Document(Base):
         nullable=False,
     )
     status: Mapped[DocumentStatus] = mapped_column(
-        Enum(DocumentStatus),
-        default=DocumentStatus.PENDING,
+        Enum(DocumentStatus, native_enum=False, length=32),
+        default=DocumentStatus.UPLOADED,
         nullable=False,
+    )
+    processing_step: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    extracted_text_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    extraction_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extracted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     error_message: Mapped[str | None] = mapped_column(
         Text,
@@ -191,7 +206,6 @@ class Document(Base):
         nullable=True,
     )
 
-    # Relationships
     project: Mapped["Project"] = relationship(
         "Project",
         back_populates="documents",

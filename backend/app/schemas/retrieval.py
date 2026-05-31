@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.rag_config import RetrievalOverrides
+
 
 class RetrievalQueryRequest(BaseModel):
     """Retrieval query request."""
@@ -15,6 +17,7 @@ class RetrievalQueryRequest(BaseModel):
     project_id: str
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
+    overrides: RetrievalOverrides | None = None
 
 
 class RetrievedChunk(BaseModel):
@@ -33,5 +36,6 @@ class RetrievalQueryResponse(BaseModel):
     project_id: str
     query: str
     retrieval_strategy: str
+    reranking_strategy: str
     total: int
     chunks: list[RetrievedChunk]

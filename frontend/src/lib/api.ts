@@ -1,4 +1,5 @@
 import axios, { type AxiosError, type AxiosInstance } from 'axios';
+import type { DocumentStatus, RagConfig, RetrievalOverrides } from './rag-types';
 
 const API_BASE_URL = '/api';
 
@@ -114,6 +115,7 @@ export interface Project {
   name: string;
   description: string | null;
   owner_id: string;
+  rag_config: RagConfig;
   document_count?: number;
   created_at: string;
   updated_at: string;
@@ -127,6 +129,7 @@ export interface ProjectListResponse {
 export interface CreateProject {
   name: string;
   description?: string;
+  rag_config?: RagConfig;
 }
 
 export const projectsApi = {
@@ -145,13 +148,27 @@ export const projectsApi = {
     return data;
   },
 
-  update: async (id: string, project: Partial<CreateProject>): Promise<Project> => {
+  update: async (
+    id: string,
+    project: Partial<CreateProject> & { rag_config?: RagConfig }
+  ): Promise<Project> => {
     const { data } = await api.patch<Project>(`/projects/${id}`, project);
     return data;
   },
 
   delete: async (id: string): Promise<void> => {
     await api.delete(`/projects/${id}`);
+  },
+
+  reindex: async (
+    id: string,
+    mode: 'auto' | 'full' | 'from_extracted' = 'auto'
+  ): Promise<{ processed: number; message: string }> => {
+    const { data } = await api.post<{ processed: number; message: string }>(
+      `/projects/${id}/reindex`,
+      { mode }
+    );
+    return data;
   },
 };
 
@@ -162,10 +179,14 @@ export interface Document {
   filename: string;
   content_type: string;
   size_bytes: number;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: DocumentStatus;
+  processing_step: string | null;
+  progress_pct: number;
+  error_message?: string | null;
   chunk_count: number;
   project_id: string;
   created_at: string;
+  processed_at?: string | null;
 }
 
 export interface DocumentListResponse {
@@ -191,6 +212,17 @@ export const documentsApi = {
   delete: async (documentId: string, projectId: string): Promise<void> => {
     await api.delete(`/projects/${projectId}/documents/${documentId}`);
   },
+
+  getContent: async (
+    projectId: string,
+    documentId: string
+  ): Promise<{ content: string; truncated: boolean }> => {
+    const { data } = await api.get<{
+      content: string;
+      truncated: boolean;
+    }>(`/projects/${projectId}/documents/${documentId}/content`);
+    return data;
+  },
 };
 
 // ============ Retrieval API ============
@@ -207,15 +239,32 @@ export interface RetrievalQueryRequest {
   project_id: string;
   query: string;
   top_k?: number;
+  overrides?: RetrievalOverrides;
 }
 
 export interface RetrievalQueryResponse {
   project_id: string;
   query: string;
   retrieval_strategy: string;
+  reranking_strategy: string;
   total: number;
   chunks: RetrievedChunk[];
 }
+
+export const ragApi = {
+  getOptions: async (): Promise<{
+    defaults: RagConfig;
+    extraction_strategies: string[];
+    chunking_strategies: string[];
+    retrieval_strategies: string[];
+    reranking_strategies: string[];
+    chunking_params: Record<string, Record<string, number | null>>;
+    retrieval_params: Record<string, Record<string, unknown>>;
+  }> => {
+    const { data } = await api.get('/rag/options');
+    return data;
+  },
+};
 
 export const retrievalApi = {
   query: async (request: RetrievalQueryRequest): Promise<RetrievalQueryResponse> => {

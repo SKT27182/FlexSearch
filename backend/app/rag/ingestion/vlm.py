@@ -4,6 +4,7 @@ FlexSearch Backend - VLM Extraction Strategy
 Vision Language Model-based extraction for images and PDFs.
 """
 
+import asyncio
 import base64
 import io
 from typing import Any
@@ -11,15 +12,24 @@ from typing import Any
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-from app.rag.ingestion.base import BaseExtractionStrategy, ExtractedContent
+from app.rag.ingestion.base import (
+    BaseExtractionStrategy,
+    ExtractedContent,
+    ExtractionProgressCallback,
+)
 from app.services.llm import get_llm_service
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
+# Keep payloads small — large base64 images slow vision APIs dramatically.
+VLM_MAX_IMAGE_SIDE = 1280
+VLM_PDF_DPI = 120
+VLM_PAGE_TIMEOUT_SEC = 180.0
+
 
 class VLMExtractionStrategy(BaseExtractionStrategy):
-    """VLM-based extraction using vision models."""
+    """VLM-based extraction using vision models for images and PDFs (per-page)."""
 
     SUPPORTED_TYPES = {
         "application/pdf",
@@ -52,63 +62,77 @@ Return only the extracted text, formatted cleanly."""
         content: bytes,
         content_type: str,
         filename: str,
+        *,
+        on_progress: ExtractionProgressCallback | None = None,
     ) -> ExtractedContent:
         """Extract text using Vision Language Model."""
-        logger.info(f"VLM extracting content from {filename} ({content_type})")
+        logger.info("VLM extracting content from %s (%s)", filename, content_type)
 
         if content_type in {"text/plain", "text/markdown"}:
-            # No need for VLM on plain text
             text = content.decode("utf-8", errors="replace")
             return ExtractedContent(
                 text=text,
                 metadata={"filename": filename, "extraction_method": "direct"},
                 page_count=1,
             )
-        elif content_type == "application/pdf":
-            return await self._extract_pdf(content, filename)
-        elif content_type.startswith("image/"):
+        if content_type == "application/pdf":
+            return await self._extract_pdf(
+                content, filename, on_progress=on_progress
+            )
+        if content_type.startswith("image/"):
             return await self._extract_image(content, filename)
-        else:
-            raise ValueError(f"Unsupported content type: {content_type}")
+        raise ValueError(f"Unsupported content type: {content_type}")
+
+    def _prepare_image_bytes(self, content: bytes) -> tuple[bytes, str]:
+        """Downscale image for faster vision API calls."""
+        image = Image.open(io.BytesIO(content))
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        w, h = image.size
+        longest = max(w, h)
+        if longest > VLM_MAX_IMAGE_SIDE:
+            scale = VLM_MAX_IMAGE_SIDE / longest
+            image = image.resize(
+                (int(w * scale), int(h * scale)),
+                Image.Resampling.LANCZOS,
+            )
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=85, optimize=True)
+        return buf.getvalue(), "image/jpeg"
 
     async def _extract_image(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract text from image using VLM."""
-        # Encode image to base64
-        base64_image = base64.b64encode(content).decode("utf-8")
+        img_bytes, mime_type = self._prepare_image_bytes(content)
+        base64_image = base64.b64encode(img_bytes).decode("utf-8")
 
-        # Determine image type
-        image = Image.open(io.BytesIO(content))
-        image_format = image.format or "PNG"
-        mime_type = f"image/{image_format.lower()}"
-
-        # Build message with image
-        messages = [
+        messages: list[dict[str, Any]] = [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{base64_image}"},
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{base64_image}",
+                        },
                     },
-                    {
-                        "type": "text",
-                        "text": self.VLM_PROMPT,
-                    },
+                    {"type": "text", "text": self.VLM_PROMPT},
                 ],
             }
         ]
 
-        # Call VLM
         llm = get_llm_service()
-
         try:
-            # Note: This requires a vision-capable model
-            response = await llm.complete(messages, max_tokens=4096)
+            response = await llm.complete(
+                messages,
+                max_tokens=4096,
+                timeout_sec=VLM_PAGE_TIMEOUT_SEC,
+            )
             extracted_text = response.content
         except Exception as e:
-            logger.error(f"VLM extraction failed: {e}")
+            logger.error("VLM extraction failed for %s: %s", filename, e)
             raise
 
+        image = Image.open(io.BytesIO(content))
         return ExtractedContent(
             text=extracted_text,
             metadata={
@@ -120,35 +144,50 @@ Return only the extracted text, formatted cleanly."""
             page_count=1,
         )
 
-    async def _extract_pdf(self, content: bytes, filename: str) -> ExtractedContent:
-        """Extract text from PDF using VLM on each page."""
-        all_text = []
-        images = []
+    async def _extract_pdf(
+        self,
+        content: bytes,
+        filename: str,
+        *,
+        on_progress: ExtractionProgressCallback | None = None,
+    ) -> ExtractedContent:
+        """Extract text from PDF by converting each page to an image and calling VLM."""
+        if on_progress:
+            await on_progress("Converting PDF to images…", None, None)
 
-        try:
-            # Convert PDF pages to images
-            pdf_images = convert_from_bytes(content, dpi=150)
-            page_count = len(pdf_images)
+        pdf_images = await asyncio.to_thread(
+            convert_from_bytes,
+            content,
+            dpi=VLM_PDF_DPI,
+        )
+        page_count = len(pdf_images)
+        logger.info("VLM PDF %s: %d page(s)", filename, page_count)
 
-            for i, page_image in enumerate(pdf_images):
-                logger.debug(f"Processing page {i+1}/{page_count}")
+        all_text: list[str] = []
+        images: list[bytes] = []
 
-                # Convert PIL image to bytes
-                img_buffer = io.BytesIO()
-                page_image.save(img_buffer, format="PNG")
-                img_bytes = img_buffer.getvalue()
-
-                # Extract using VLM
-                page_result = await self._extract_image(
-                    img_bytes,
-                    f"{filename}_page_{i+1}",
+        for i, page_image in enumerate(pdf_images):
+            page_num = i + 1
+            if on_progress:
+                await on_progress(
+                    f"Extracting page {page_num}/{page_count} with VLM…",
+                    page_num,
+                    page_count,
                 )
-                all_text.append(f"--- Page {i+1} ---\n{page_result.text}")
-                images.append(img_bytes)
+            logger.info(
+                "VLM PDF %s: processing page %d/%d", filename, page_num, page_count
+            )
 
-        except Exception as e:
-            logger.error(f"VLM PDF extraction failed: {e}")
-            raise
+            img_buffer = io.BytesIO()
+            page_image.save(img_buffer, format="PNG")
+            img_bytes = img_buffer.getvalue()
+
+            page_result = await self._extract_image(
+                img_bytes,
+                f"{filename}_page_{page_num}",
+            )
+            all_text.append(f"--- Page {page_num} ---\n{page_result.text}")
+            images.append(img_bytes)
 
         return ExtractedContent(
             text="\n\n".join(all_text),
@@ -157,5 +196,5 @@ Return only the extracted text, formatted cleanly."""
                 "extraction_method": "vlm_pdf",
             },
             images=images,
-            page_count=len(pdf_images),
+            page_count=page_count,
         )

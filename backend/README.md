@@ -20,7 +20,11 @@ Important variables:
 - `SERVICE_PUBLIC_HOST`: public host used for generated service/admin links
 - `CORS_ORIGINS`: comma-separated or JSON array of allowed origins
 - `POSTGRES_*`, `QDRANT_*`, `MINIO_*`: service connection values
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`: Redis for document status pub/sub (match infra-hub; optional `REDIS_URL` override)
+- `EXTRACTION_STRATEGY`, `CHUNKING_STRATEGY`, `RETRIEVAL_STRATEGY`, `RERANKING_STRATEGY`: defaults for new projects (`RagConfig.from_settings()`); per-project overrides live in `projects.rag_config`
 - `*_SERVICE_NAME`, `*_DISPLAY_NAME`, `*_CONTAINER_NAME`: service metadata
+
+Per-project RAG, async ingestion, SSE, and reindex modes are documented in the repository root [README.md](../README.md).
 
 ## Database migrations
 

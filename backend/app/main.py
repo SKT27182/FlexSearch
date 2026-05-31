@@ -21,11 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.utils.logger import create_logger
 
-from app.api import admin, auth, documents, projects, retrieval
+from app.api import admin, auth, documents, projects, rag, retrieval
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.core.security import verify_password
 from app.db.postgres import close_db, init_db
+from app.services.redis_client import close_redis
 from app.db.models import User
 
 logger = create_logger(__name__, level=settings.log_level)
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     # Shutdown
     logger.info("Shutting down FlexSearch Backend...")
+    await close_redis()
     await close_db()
     logger.info("Cleanup complete")
 
@@ -104,6 +106,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(retrieval.router, prefix="/api")
+app.include_router(rag.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 

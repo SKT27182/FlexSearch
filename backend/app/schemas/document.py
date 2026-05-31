@@ -19,6 +19,8 @@ class DocumentResponse(BaseModel):
     content_type: str
     file_size: int = Field(..., serialization_alias="size_bytes")
     status: str
+    processing_step: str | None = None
+    progress_pct: int = 0
     error_message: str | None
     chunk_count: int
     created_at: datetime
@@ -26,6 +28,7 @@ class DocumentResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 class DocumentListResponse(BaseModel):
@@ -33,6 +36,15 @@ class DocumentListResponse(BaseModel):
 
     documents: list[DocumentResponse]
     total: int
+
+
+class DocumentContentResponse(BaseModel):
+    """Extracted markdown/text content."""
+
+    document_id: UUID
+    content: str
+    content_type: str = "text/markdown; charset=utf-8"
+    truncated: bool = False
 
 
 class DocumentUploadResponse(BaseModel):

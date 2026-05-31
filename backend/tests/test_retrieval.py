@@ -49,12 +49,8 @@ class TestRetrievalQuery:
         project_id = project_response.json()["id"]
 
         class FakePipeline:
-            retrieval_strategy = "dense"
-
-            async def retrieve(
-                self, query: str, project_id: str, top_k: int = 5
-            ) -> list[RetrievalResult]:
-                return [
+            async def retrieve(self, query, project_id, top_k=5, overrides=None):
+                results = [
                     RetrievalResult(
                         content="First chunk",
                         score=0.92,
@@ -69,11 +65,12 @@ class TestRetrievalQuery:
                         chunk_id="chunk-2",
                         metadata={"filename": "test2.pdf", "chunk_index": 3},
                     ),
-                ][:top_k]
+                ]
+                return results[:top_k], "dense", "none"
 
         monkeypatch.setattr(
             "app.api.retrieval.get_rag_pipeline",
-            lambda: FakePipeline(),
+            lambda config=None: FakePipeline(),
         )
 
         response = await async_client.post(

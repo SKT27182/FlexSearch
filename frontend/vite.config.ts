@@ -36,6 +36,15 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: apiTarget,
           changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on('proxyRes', (proxyRes, req, res) => {
+              const path = req.url ?? '';
+              if (!path.includes('/documents/events')) return;
+              res.setHeader('Cache-Control', 'no-cache');
+              res.setHeader('X-Accel-Buffering', 'no');
+              delete proxyRes.headers['content-encoding'];
+            });
+          },
         },
       },
     },

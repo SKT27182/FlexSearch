@@ -124,6 +124,60 @@ async def _upgrade_user_hierarchy(conn) -> None:
     )
 
 
+async def _upgrade_project_rag_config(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE projects
+            ADD COLUMN IF NOT EXISTS rag_config JSONB NOT NULL DEFAULT '{}'::jsonb;
+            """
+        )
+    )
+
+
+async def _upgrade_document_processing(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS processing_step VARCHAR(255);
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS progress_pct INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS extracted_text_path VARCHAR(512);
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS extraction_config_hash VARCHAR(64);
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ;
+            """
+        )
+    )
+
+
 async def init_db() -> None:
     """Initialize database and required tables."""
     await ensure_database_exists()
@@ -131,7 +185,8 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _upgrade_user_hierarchy(conn)
         await _upgrade_user_name(conn)
-        # Cleanup legacy table removed in retrieval-only mode.
+        await _upgrade_project_rag_config(conn)
+        await _upgrade_document_processing(conn)
         await conn.execute(text("DROP TABLE IF EXISTS token_usage"))
     logger.info("Database tables initialized")
 

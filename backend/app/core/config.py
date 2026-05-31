@@ -7,7 +7,7 @@ from this file - never use os.getenv() directly elsewhere.
 
 import json
 from typing import Literal, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -64,6 +64,12 @@ class Settings(BaseSettings):
             self.infra_hub_postgres_url = infra.set(
                 drivername=driver
             ).render_as_string(hide_password=False)
+
+        if not self.redis_url:
+            pwd = quote_plus(self.redis_password)
+            self.redis_url = (
+                f"redis://:{pwd}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+            )
 
         return self
 
@@ -161,13 +167,37 @@ class Settings(BaseSettings):
         default="fixed_window",
         description="Text chunking strategy",
     )
-    retrieval_strategy: Literal["dense", "parent_child", "hybrid"] = Field(
+    retrieval_strategy: Literal["dense", "parent_child", "hybrid", "bm25"] = Field(
         default="dense",
         description="Retrieval strategy",
     )
     reranking_strategy: Literal["none", "cross_encoder"] = Field(
         default="none",
         description="Reranking strategy",
+    )
+
+    # =========================================================================
+    # REDIS (document status pub/sub + SSE; align with infra-hub backend/.env)
+    # =========================================================================
+    redis_host: str = Field(
+        default="127.0.0.1",
+        description="Redis host (infra-hub: localhost from host machine)",
+    )
+    redis_port: int = Field(
+        default=63791,
+        description="Redis port (infra-hub REDIS_PORT, host-mapped)",
+    )
+    redis_password: str = Field(
+        default="password",
+        description="Redis password (infra-hub REDIS_PASSWORD)",
+    )
+    redis_db: int = Field(
+        default=0,
+        description="Redis database index",
+    )
+    redis_url: Optional[str] = Field(
+        default=None,
+        description="Full Redis URL (overrides host/port/password/db if set)",
     )
 
     # =========================================================================

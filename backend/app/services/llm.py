@@ -4,6 +4,7 @@ FlexSearch Backend - LLM Service
 LiteLLM-based LLM provider abstraction.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -47,13 +48,16 @@ class LLMService:
             return "openai"
         if model.startswith("claude"):
             return "anthropic"
+        if model.startswith("gemini"):
+            return "google"
         return "unknown"
 
     async def complete(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        timeout_sec: float = 120.0,
     ) -> LLMResponse:
         """
         Generate a completion.
@@ -69,12 +73,15 @@ class LLMService:
         start_time = time.time()
 
         try:
-            response = await acompletion(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                api_key=self._api_key,
+            response = await asyncio.wait_for(
+                acompletion(
+                    model=self._model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    api_key=self._api_key,
+                ),
+                timeout=timeout_sec,
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -92,6 +99,15 @@ class LLMService:
                 provider=self._provider,
                 latency_ms=latency_ms,
             )
+        except asyncio.TimeoutError:
+            logger.error(
+                "LLM completion timed out after %ss (model=%s)",
+                timeout_sec,
+                self._model,
+            )
+            raise TimeoutError(
+                f"LLM request timed out after {int(timeout_sec)}s"
+            ) from None
         except Exception:
             logger.exception("LLM completion failed")
             raise

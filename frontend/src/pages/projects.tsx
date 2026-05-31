@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { RagConfigForm, defaultRagConfig } from '@/components/RagConfigForm';
+import type { RagConfig } from '@/lib/rag-types';
 import { Link } from 'react-router-dom';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
@@ -11,6 +13,7 @@ export function ProjectsPage() {
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [creating, setCreating] = useState(false);
+  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultRagConfig());
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,7 +21,7 @@ export function ProjectsPage() {
 
     setCreating(true);
     try {
-      await createProject(newName.trim(), newDescription.trim() || undefined);
+      await createProject(newName.trim(), newDescription.trim() || undefined, ragConfig);
       setNewName('');
       setNewDescription('');
       setShowCreate(false);
@@ -79,6 +82,7 @@ export function ProjectsPage() {
                   onChange={(e) => setNewDescription(e.target.value)}
                 />
               </div>
+              <RagConfigForm value={ragConfig} onChange={setRagConfig} compact />
             </CardContent>
             <CardFooter className="flex gap-3">
               <Button type="submit" isLoading={creating}>

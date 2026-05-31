@@ -4,37 +4,22 @@ FlexSearch Backend - RAG Pipeline
 Main orchestrator for the RAG workflow.
 """
 
-from typing import Any
-from uuid import UUID, uuid5, NAMESPACE_DNS
+from __future__ import annotations
 
-from app.core.config import settings
-from app.rag.chunking import (
-    BaseChunkingStrategy,
-    Chunk,
-    FixedWindowChunking,
-    ParentChildChunking,
-    RecursiveChunking,
-    SemanticChunking,
-)
+from typing import Any
+from uuid import NAMESPACE_DNS, uuid5
+
+from app.rag.chunking.base import Chunk
 from app.rag.embedding import get_embedding_service
-from app.rag.ingestion import (
-    BaseExtractionStrategy,
-    ExtractedContent,
-    OCRExtractionStrategy,
-    VLMExtractionStrategy,
+from app.rag.factory import (
+    build_chunking_strategy,
+    build_extraction_strategy,
+    build_reranking_strategy,
+    build_retrieval_strategy,
 )
-from app.rag.reranking import (
-    BaseRerankingStrategy,
-    CrossEncoderReranking,
-    NoReranking,
-)
-from app.rag.retrieval import (
-    BaseRetrievalStrategy,
-    DenseRetrieval,
-    HybridRetrieval,
-    ParentChildRetrieval,
-    RetrievalResult,
-)
+from app.rag.ingestion.base import ExtractedContent, ExtractionProgressCallback
+from app.rag.retrieval.base import RetrievalResult
+from app.schemas.rag_config import EffectiveRagConfig, RagConfig, RetrievalOverrides
 from app.services.vector_store import get_vector_store
 from app.utils.logger import create_logger
 
@@ -42,115 +27,63 @@ logger = create_logger(__name__)
 
 
 class RAGPipeline:
-    """
-    Main RAG pipeline orchestrator.
+    """RAG pipeline with per-project configuration."""
 
-    Strategies are selected once per deployment via configuration.
-    """
-
-    def __init__(self) -> None:
-        # Initialize strategies based on config
-        self._extraction = self._create_extraction_strategy()
-        self._chunking = self._create_chunking_strategy()
-        self._retrieval = self._create_retrieval_strategy()
-        self._reranking = self._create_reranking_strategy()
+    def __init__(self, config: RagConfig) -> None:
+        self._config = config
+        self._extraction = build_extraction_strategy(config.extraction)
+        self._chunking = build_chunking_strategy(config.chunking)
         self._embedding = get_embedding_service()
         self._vector_store = get_vector_store()
 
-        logger.info(
-            f"RAG Pipeline initialized: "
-            f"extraction={self._extraction.name}, "
-            f"chunking={self._chunking.name}, "
-            f"retrieval={self._retrieval.name}, "
-            f"reranking={self._reranking.name}"
-        )
+    @property
+    def config(self) -> RagConfig:
+        return self._config
 
-    def _create_extraction_strategy(self) -> BaseExtractionStrategy:
-        """Create extraction strategy from config."""
-        if settings.extraction_strategy == "vlm":
-            return VLMExtractionStrategy()
-        return OCRExtractionStrategy()
-
-    def _create_chunking_strategy(self) -> BaseChunkingStrategy:
-        """Create chunking strategy from config."""
-        match settings.chunking_strategy:
-            case "recursive":
-                return RecursiveChunking()
-            case "semantic":
-                return SemanticChunking()
-            case "parent_child":
-                return ParentChildChunking()
-            case _:
-                return FixedWindowChunking()
-
-    def _create_retrieval_strategy(self) -> BaseRetrievalStrategy:
-        """Create retrieval strategy from config."""
-        match settings.retrieval_strategy:
-            case "parent_child":
-                return ParentChildRetrieval()
-            case "hybrid":
-                return HybridRetrieval()
-            case _:
-                return DenseRetrieval()
-
-    def _create_reranking_strategy(self) -> BaseRerankingStrategy:
-        """Create reranking strategy from config."""
-        if settings.reranking_strategy == "cross_encoder":
-            return CrossEncoderReranking()
-        return NoReranking()
-
-    async def ingest_document(
+    async def extract_document(
         self,
         content: bytes,
         content_type: str,
         filename: str,
+        *,
+        on_progress: ExtractionProgressCallback | None = None,
+    ) -> ExtractedContent:
+        return await self._extraction.extract(
+            content,
+            content_type,
+            filename,
+            on_progress=on_progress,
+        )
+
+    def chunk_text(
+        self,
+        text: str,
         document_id: str,
+        filename: str,
         project_id: str,
-    ) -> int:
-        """
-        Ingest a document into the RAG system.
-
-        Args:
-            content: Raw file bytes
-            content_type: MIME type
-            filename: Original filename
-            document_id: Document ID for tracking
-            project_id: Project to add document to
-
-        Returns:
-            Number of chunks created
-        """
-        logger.info(f"Ingesting document: {filename} (project: {project_id})")
-
-        # Extract text
-        extracted = await self._extraction.extract(content, content_type, filename)
-
-        if extracted.is_empty:
-            logger.warning(f"No text extracted from {filename}")
-            return 0
-
-        # Chunk the text
-        chunks = self._chunking.chunk(
-            text=extracted.text,
+        page_count: int = 0,
+    ) -> list[Chunk]:
+        return self._chunking.chunk(
+            text=text,
             document_id=document_id,
             metadata={
                 "filename": filename,
                 "project_id": project_id,
-                "page_count": extracted.page_count,
+                "page_count": page_count,
             },
         )
 
+    def index_chunks(
+        self,
+        chunks: list[Chunk],
+        document_id: str,
+        project_id: str,
+        filename: str,
+    ) -> int:
         if not chunks:
-            logger.warning(f"No chunks created from {filename}")
             return 0
-
-        # Generate embeddings
         chunk_texts = [chunk.content for chunk in chunks]
         embeddings = self._embedding.embed_batch(chunk_texts)
-
-        # Prepare for vector store
-        # Generate deterministic UUIDs for each chunk using UUID5
-        # This ensures Qdrant compatibility (requires UUID or int, not string)
         ids = [
             str(uuid5(NAMESPACE_DNS, f"{document_id}_{chunk.chunk_index}"))
             for chunk in chunks
@@ -169,77 +102,56 @@ class RAGPipeline:
             }
             for chunk in chunks
         ]
-
-        # Store in vector database
         self._vector_store.upsert_vectors(ids, embeddings, payloads)
-
-        logger.info(f"Ingested {len(chunks)} chunks from {filename}")
         return len(chunks)
+
+    async def ingest_from_text(
+        self,
+        text: str,
+        document_id: str,
+        project_id: str,
+        filename: str,
+        page_count: int = 0,
+    ) -> int:
+        chunks = self.chunk_text(text, document_id, filename, project_id, page_count)
+        return self.index_chunks(chunks, document_id, project_id, filename)
 
     async def retrieve(
         self,
         query: str,
         project_id: str,
         top_k: int = 5,
-    ) -> list[RetrievalResult]:
-        """
-        Retrieve relevant chunks for a query.
+        overrides: RetrievalOverrides | None = None,
+    ) -> tuple[list[RetrievalResult], str, str]:
+        effective = EffectiveRagConfig.for_retrieval(
+            self._config, overrides, top_k=top_k
+        )
+        retrieval = build_retrieval_strategy(effective.retrieval)
+        reranking = build_reranking_strategy(effective.reranking)
+        k = effective.top_k
 
-        Args:
-            query: User query
-            project_id: Project to search
-            top_k: Number of results
-
-        Returns:
-            List of retrieval results
-        """
-        # Retrieve
-        results = await self._retrieval.retrieve(
+        results = await retrieval.retrieve(
             query=query,
             project_id=project_id,
-            top_k=top_k * 2,  # Get more for reranking
+            top_k=k * 2,
         )
-
-        # Rerank
-        reranked = await self._reranking.rerank(
-            query=query,
-            results=results,
-            top_k=top_k,
-        )
-
-        return reranked
+        reranked = await reranking.rerank(query=query, results=results, top_k=k)
+        return reranked, retrieval.name, reranking.name
 
     async def query(
         self,
         query: str,
         project_id: str,
         top_k: int = 5,
+        overrides: RetrievalOverrides | None = None,
     ) -> dict[str, Any]:
-        """
-        Full RAG query: retrieve + format context.
-
-        Args:
-            query: User query
-            project_id: Project to search
-            top_k: Number of results
-
-        Returns:
-            Dict with context and sources
-        """
-        results = await self.retrieve(query, project_id, top_k)
-
-        context_chunks = [
-            {
-                "content": r.content,
-                "score": r.score,
-                "metadata": r.metadata,
-            }
-            for r in results
-        ]
-
+        results, _, _ = await self.retrieve(query, project_id, top_k, overrides)
         return {
             "context": "\n\n".join(r.content for r in results),
-            "chunks": context_chunks,
+            "chunks": [
+                {"content": r.content, "score": r.score, "metadata": r.metadata}
+                for r in results
+            ],
             "sources": [
                 {
                     "filename": r.metadata.get("filename", ""),
@@ -252,28 +164,20 @@ class RAGPipeline:
         }
 
     def delete_project_data(self, project_id: str) -> None:
-        """Delete all data for a project."""
         self._vector_store.delete_by_project(project_id)
         logger.info(f"Deleted RAG data for project: {project_id}")
 
     def delete_document_data(self, document_id: str) -> None:
-        """Delete all data for a document."""
         self._vector_store.delete_by_document(document_id)
         logger.info(f"Deleted RAG data for document: {document_id}")
 
-    @property
-    def retrieval_strategy(self) -> str:
-        """Get active retrieval strategy name."""
-        return self._retrieval.name
+
+def create_pipeline(config: RagConfig) -> RAGPipeline:
+    return RAGPipeline(config)
 
 
-# Singleton instance
-_rag_pipeline: RAGPipeline | None = None
+def get_rag_pipeline(config: RagConfig | None = None) -> RAGPipeline:
+    """Build pipeline from config or deployment defaults."""
+    from app.schemas.rag_config import RagConfig as RC
 
-
-def get_rag_pipeline() -> RAGPipeline:
-    """Get RAG pipeline singleton."""
-    global _rag_pipeline
-    if _rag_pipeline is None:
-        _rag_pipeline = RAGPipeline()
-    return _rag_pipeline
+    return create_pipeline(config or RC.from_settings())

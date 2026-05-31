@@ -4,6 +4,7 @@ FlexSearch Backend - OCR Extraction Strategy
 Tesseract-based OCR for text extraction from PDFs and images.
 """
 
+import asyncio
 import io
 import shutil
 from typing import Any
@@ -13,7 +14,11 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from pypdf import PdfReader
 
-from app.rag.ingestion.base import BaseExtractionStrategy, ExtractedContent
+from app.rag.ingestion.base import (
+    BaseExtractionStrategy,
+    ExtractedContent,
+    ExtractionProgressCallback,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -63,18 +68,21 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
         content: bytes,
         content_type: str,
         filename: str,
+        *,
+        on_progress: ExtractionProgressCallback | None = None,
     ) -> ExtractedContent:
         """Extract text using OCR when needed."""
-        logger.info(f"Extracting content from {filename} ({content_type})")
+        logger.info("Extracting content from %s (%s)", filename, content_type)
 
         if content_type in {"text/plain", "text/markdown"}:
             return self._extract_text(content, filename)
-        elif content_type == "application/pdf":
-            return await self._extract_pdf(content, filename)
-        elif content_type.startswith("image/"):
-            return await self._extract_image(content, filename)
-        else:
-            raise ValueError(f"Unsupported content type: {content_type}")
+        if content_type == "application/pdf":
+            if on_progress:
+                await on_progress("Extracting text from PDF…", None, None)
+            return await asyncio.to_thread(self._extract_pdf, content, filename)
+        if content_type.startswith("image/"):
+            return await asyncio.to_thread(self._extract_image, content, filename)
+        raise ValueError(f"Unsupported content type: {content_type}")
 
     def _extract_text(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract plain text files."""
@@ -85,7 +93,7 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
             page_count=1,
         )
 
-    async def _extract_pdf(self, content: bytes, filename: str) -> ExtractedContent:
+    def _extract_pdf(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract text from PDF, using OCR for image-based pages."""
         if not shutil.which("tesseract"):
             raise RuntimeError(
@@ -149,7 +157,7 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
             page_count=page_count,
         )
 
-    async def _extract_image(self, content: bytes, filename: str) -> ExtractedContent:
+    def _extract_image(self, content: bytes, filename: str) -> ExtractedContent:
         """Extract text from image using OCR."""
         if not shutil.which("tesseract"):
             raise RuntimeError(

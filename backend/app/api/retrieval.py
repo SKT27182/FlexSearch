@@ -11,16 +11,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Project, User
-from app.services.project_access import user_can_access_project
 from app.rag.pipeline import get_rag_pipeline
+from app.schemas.rag_config import RagConfig
 from app.schemas.retrieval import (
     RetrievedChunk,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
 )
-from app.core.config import settings
+from app.services.project_access import user_can_access_project
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__, level=settings.log_level)
@@ -46,28 +47,18 @@ async def query_retrieval(
     result = await db.execute(select(Project).where(Project.id == project_uuid))
     project = result.scalar_one_or_none()
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
-        )
+        raise HTTPException(status_code=404, detail="Project not found")
 
     if not user_can_access_project(current_user, project):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this project",
-        )
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-    logger.verbose(
-        "Retrieval query: project=%s user=%s top_k=%d",
-        request.project_id,
-        current_user.email,
-        request.top_k,
-    )
-    rag_pipeline = get_rag_pipeline()
-    results = await rag_pipeline.retrieve(
+    rag_config = RagConfig.from_db(project.rag_config)
+    pipeline = get_rag_pipeline(rag_config)
+    results, retrieval_name, rerank_name = await pipeline.retrieve(
         query=request.query,
         project_id=request.project_id,
         top_k=request.top_k,
+        overrides=request.overrides,
     )
 
     chunks = [
@@ -81,15 +72,11 @@ async def query_retrieval(
         for result in results
     ]
 
-    logger.info(
-        f"Retrieval query served: project={request.project_id}, "
-        f"user={current_user.email}, results={len(chunks)}"
-    )
-
     return RetrievalQueryResponse(
         project_id=request.project_id,
         query=request.query,
-        retrieval_strategy=rag_pipeline.retrieval_strategy,
+        retrieval_strategy=retrieval_name,
+        reranking_strategy=rerank_name,
         total=len(chunks),
         chunks=chunks,
     )

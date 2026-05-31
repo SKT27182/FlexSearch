@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { projectsApi, type Project } from '@/lib/api';
+import type { RagConfig } from '@/lib/rag-types';
 
 interface ProjectState {
   projects: Project[];
@@ -9,7 +10,11 @@ interface ProjectState {
   // Actions
   fetchProjects: () => Promise<void>;
   selectProject: (project: Project | null) => void;
-  createProject: (name: string, description?: string) => Promise<Project>;
+  createProject: (
+    name: string,
+    description?: string,
+    rag_config?: RagConfig
+  ) => Promise<Project>;
   deleteProject: (id: string) => Promise<void>;
   
   // Reset all state
@@ -35,8 +40,8 @@ export const useProjectStore = create<ProjectState>()((set) => ({
     set({ currentProject: project });
   },
 
-  createProject: async (name, description) => {
-    const project = await projectsApi.create({ name, description });
+  createProject: async (name, description, rag_config) => {
+    const project = await projectsApi.create({ name, description, rag_config });
     set((state) => ({ projects: [project, ...state.projects] }));
     return project;
   },

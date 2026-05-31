@@ -5,8 +5,14 @@ Abstract base class for document extraction strategies.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Optional callback: (processing_step, current_page, total_pages)
+ExtractionProgressCallback = Callable[
+    [str, int | None, int | None], Awaitable[None]
+]
 
 
 @dataclass
@@ -33,6 +39,8 @@ class BaseExtractionStrategy(ABC):
         content: bytes,
         content_type: str,
         filename: str,
+        *,
+        on_progress: ExtractionProgressCallback | None = None,
     ) -> ExtractedContent:
         """
         Extract text content from a document.

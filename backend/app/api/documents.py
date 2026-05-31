@@ -4,27 +4,47 @@ FlexSearch Backend - Documents API Router
 Document upload and management endpoints.
 """
 
-from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.document_sse import stream_document_events, stream_project_events
 from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Document, DocumentStatus, Project, User
-from app.services.project_access import user_can_access_project
 from app.schemas.document import (
+    DocumentContentResponse,
     DocumentListResponse,
     DocumentResponse,
-    DocumentUploadResponse,
 )
+from app.services.document_status import update_document_status
+from app.services.document_storage import (
+    extracted_md_key,
+    extracted_meta_key,
+    raw_object_key,
+)
+from app.services.document_tasks import schedule_process_document
+from app.services.project_access import user_can_access_project
+from app.services.storage import get_storage_service
+from app.rag.pipeline import create_pipeline
+from app.services.document_worker import get_project_rag_config
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
+
+PREVIEW_STATUSES = {
+    DocumentStatus.EXTRACTED,
+    DocumentStatus.CHUNKING,
+    DocumentStatus.INDEXING,
+    DocumentStatus.COMPLETED,
+}
+
+CONTENT_MAX_CHARS = 500_000
 
 
 async def verify_project_access(
@@ -32,7 +52,6 @@ async def verify_project_access(
     current_user: User,
     db: AsyncSession,
 ) -> Project:
-    """Verify user has access to the project."""
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
 
@@ -62,20 +81,9 @@ async def upload_document(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DocumentResponse:
-    """
-    Upload a document to a project.
-
-    Supported formats: PDF, TXT, MD, images (PNG, JPG, JPEG).
-    """
+    """Upload a document; processing runs in the background."""
     await verify_project_access(project_id, current_user, db)
-    logger.info(
-        "Document upload started: project=%s file=%s user=%s",
-        project_id,
-        file.filename,
-        current_user.email,
-    )
 
-    # Validate file type
     allowed_types = {
         "application/pdf",
         "text/plain",
@@ -91,72 +99,46 @@ async def upload_document(
             detail=f"File type {file.content_type} not supported",
         )
 
-    # Read file content
     content = await file.read()
     file_size = len(content)
+    filename = file.filename or "untitled"
 
-    # Generate storage path
-    storage_path = f"{project_id}/{file.filename}"
-
-    # Create document record
     document = Document(
         project_id=project_id,
-        filename=file.filename or "untitled",
+        filename=filename,
         content_type=file.content_type or "application/octet-stream",
-        storage_path=storage_path,
+        storage_path="",
         file_size=file_size,
-        status=DocumentStatus.PENDING,
+        status=DocumentStatus.UPLOADED,
+        processing_step="Upload received",
+        progress_pct=10,
     )
-
     db.add(document)
+    await db.flush()
+
+    storage_path = raw_object_key(project_id, document.id, filename)
+    document.storage_path = storage_path
     await db.commit()
     await db.refresh(document)
 
-    try:
-        # Upload to MinIO
-        from app.services.storage import get_storage_service
+    storage = get_storage_service()
+    storage.upload_file(
+        path=storage_path,
+        data=content,
+        content_type=document.content_type,
+    )
 
-        storage = get_storage_service()
-        storage.upload_file(
-            path=storage_path,
-            data=content,
-            content_type=file.content_type or "application/octet-stream",
-        )
+    await update_document_status(
+        db,
+        document,
+        status=DocumentStatus.STORED,
+        processing_step="Saved to storage",
+        progress_pct=25,
+    )
 
-        # Trigger RAG ingestion pipeline
-        from app.rag.pipeline import get_rag_pipeline
+    schedule_process_document(document.id, project_id)
 
-        rag_pipeline = get_rag_pipeline()
-        chunk_count = await rag_pipeline.ingest_document(
-            content=content,
-            content_type=file.content_type or "application/octet-stream",
-            filename=file.filename or "untitled",
-            document_id=str(document.id),
-            project_id=str(project_id),
-        )
-
-        # Update document status to COMPLETED
-        document.status = DocumentStatus.COMPLETED
-        document.chunk_count = chunk_count
-        document.processed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await db.refresh(document)
-
-        logger.info(
-            f"Document processed: {file.filename} ({chunk_count} chunks) "
-            f"to project {project_id}"
-        )
-
-    except Exception as e:
-        # Update status to FAILED on error
-        logger.error(f"Failed to process document {file.filename}: {e}")
-        document.status = DocumentStatus.FAILED
-        document.error_message = str(e)
-        await db.commit()
-        await db.refresh(document)
-        # Don't raise - return document with FAILED status
-
-    return document
+    return DocumentResponse.model_validate(document)
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -167,7 +149,6 @@ async def list_documents(
     skip: int = 0,
     limit: int = 100,
 ) -> DocumentListResponse:
-    """List all documents in a project."""
     await verify_project_access(project_id, current_user, db)
 
     query = (
@@ -177,7 +158,6 @@ async def list_documents(
         .limit(limit)
         .order_by(Document.created_at.desc())
     )
-
     result = await db.execute(query)
     documents = result.scalars().all()
 
@@ -194,14 +174,36 @@ async def list_documents(
     )
 
 
+@router.get("/events")
+async def project_document_events(
+    project_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    await verify_project_access(project_id, current_user, db)
+
+    async def event_generator():
+        async for chunk in stream_project_events(db, project_id):
+            yield chunk
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     project_id: UUID,
     document_id: UUID,
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> Document:
-    """Get a specific document."""
+) -> DocumentResponse:
     await verify_project_access(project_id, current_user, db)
 
     result = await db.execute(
@@ -218,7 +220,100 @@ async def get_document(
             detail="Document not found",
         )
 
-    return document
+    return DocumentResponse.model_validate(document)
+
+
+@router.get("/{document_id}/events")
+async def document_events(
+    project_id: UUID,
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    await verify_project_access(project_id, current_user, db)
+
+    async def event_generator():
+        async for chunk in stream_document_events(db, project_id, document_id):
+            yield chunk
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{document_id}/retry", response_model=DocumentResponse)
+async def retry_document_processing(
+    project_id: UUID,
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DocumentResponse:
+    """Re-run ingestion for a stuck or failed document."""
+    await verify_project_access(project_id, current_user, db)
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.project_id == project_id,
+        )
+    )
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    schedule_process_document(
+        document.id,
+        project_id,
+        force_full_extract=True,
+    )
+    return DocumentResponse.model_validate(document)
+
+
+@router.get("/{document_id}/content", response_model=DocumentContentResponse)
+async def get_document_content(
+    project_id: UUID,
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DocumentContentResponse:
+    await verify_project_access(project_id, current_user, db)
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.project_id == project_id,
+        )
+    )
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if document.status not in PREVIEW_STATUSES:
+        raise HTTPException(
+            status_code=404,
+            detail="Extracted content not available yet",
+        )
+
+    path = document.extracted_text_path or extracted_md_key(project_id, document_id)
+    storage = get_storage_service()
+    if not storage.file_exists(path):
+        raise HTTPException(status_code=404, detail="Extracted content not found")
+
+    raw = storage.download_file(path).decode("utf-8")
+    truncated = len(raw) > CONTENT_MAX_CHARS
+    content = raw[:CONTENT_MAX_CHARS] if truncated else raw
+
+    return DocumentContentResponse(
+        document_id=document_id,
+        content=content,
+        truncated=truncated,
+    )
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -228,7 +323,6 @@ async def delete_document(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Delete a document."""
     await verify_project_access(project_id, current_user, db)
 
     result = await db.execute(
@@ -240,36 +334,26 @@ async def delete_document(
     document = result.scalar_one_or_none()
 
     if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    # Delete from MinIO
+    storage = get_storage_service()
+    for path in (
+        document.storage_path,
+        document.extracted_text_path,
+        extracted_md_key(project_id, document_id),
+        extracted_meta_key(project_id, document_id),
+    ):
+        if path and storage.file_exists(path):
+            try:
+                storage.delete_file(path)
+            except Exception as e:
+                logger.error("Failed to delete %s: %s", path, e)
+
     try:
-        from app.services.storage import get_storage_service
-
-        storage = get_storage_service()
-        if storage.file_exists(document.storage_path):
-            storage.delete_file(document.storage_path)
-            logger.info(f"Deleted file from MinIO: {document.storage_path}")
+        rag_config = await get_project_rag_config(db, project_id)
+        create_pipeline(rag_config).delete_document_data(str(document.id))
     except Exception as e:
-        logger.error(f"Failed to delete file from MinIO: {e}")
-        # Continue with deletion even if MinIO fails
+        logger.error("Failed to delete vectors: %s", e)
 
-    # Delete from Qdrant
-    try:
-        from app.rag.pipeline import get_rag_pipeline
-
-        rag_pipeline = get_rag_pipeline()
-        rag_pipeline.delete_document_data(str(document.id))
-        logger.info(f"Deleted vectors from Qdrant for document: {document.id}")
-    except Exception as e:
-        logger.error(f"Failed to delete vectors from Qdrant: {e}")
-        # Continue with deletion even if Qdrant fails
-
-    # Delete from database
     await db.delete(document)
     await db.commit()
-
-    logger.info(f"Document deleted: {document.filename}")
