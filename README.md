@@ -5,6 +5,7 @@ A high-performance, local-first retrieval-first RAG platform with project-centri
 ## Features
 
 - **Project-based Organization**: Group documents and retrieval workflows by project
+- **Dual RAG modes**: Choose **Vector RAG** (Qdrant) or **Graph RAG** (Neo4j) per project at creation — modes are mutually exclusive
 - **Modular RAG Engine**: Configurable strategies for ingestion, chunking, retrieval, and reranking
 - **Retrieval API**: Stateless query endpoint returning ranked chunks and metadata
 - **Admin Dashboard**: User and document management
@@ -33,7 +34,10 @@ brew install tesseract poppler
 
 ### 1. Start Infrastructure
 
-Make sure the required services (PostgreSQL, Qdrant, MinIO) are already running and reachable on the ports configured in `backend/.env`.
+Make sure the required services are running and reachable on the ports configured in `backend/.env`:
+
+- **Vector RAG projects**: PostgreSQL, Qdrant, MinIO, Redis
+- **Graph RAG projects**: PostgreSQL, **Neo4j** (from [infra-hub](https://github.com)), MinIO, Redis, plus `API_KEY` for LLM entity extraction
 
 ### 2. Configure Environment
 
@@ -73,7 +77,16 @@ make dev
 
 ## Per-project RAG configuration
 
-Each project stores a `rag_config` JSON object (extraction, chunking, default retrieval, reranking). Set it when creating a project in the UI or via `POST/PATCH /api/projects`. Per-query overrides are supported on `POST /api/retrieval/query` without changing stored project settings.
+Each project has an immutable **`rag_mode`** chosen at creation:
+
+| Mode | Storage | Retrieval strategies |
+|------|---------|----------------------|
+| `vector` | Qdrant chunk embeddings | `dense`, `bm25`, `hybrid`, `parent_child` |
+| `graph` | Neo4j knowledge graph | `graph_local`, `graph_global` |
+
+Graph projects use LLM-based entity/relation extraction during indexing. Set `NEO4J_URI`, `NEO4J_USER`, and `NEO4J_PASSWORD` in `backend/.env` to match infra-hub Neo4j credentials.
+
+Each project stores a `rag_config` JSON object (shape depends on mode). Set it when creating a project in the UI or via `POST /api/projects`. Per-query overrides are supported on `POST /api/retrieval/query` without changing stored project settings.
 
 **Defaults:** New projects inherit strategy *names* from environment variables (see table below). `RagConfig.from_settings()` in the backend builds the full default object including strategy-specific params. After create, the project’s stored `rag_config` is the source of truth for ingestion and default retrieval.
 

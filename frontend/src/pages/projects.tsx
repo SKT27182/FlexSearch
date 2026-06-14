@@ -1,6 +1,10 @@
 import { useState } from 'react';
-import { RagConfigForm, defaultRagConfig } from '@/components/RagConfigForm';
-import type { RagConfig } from '@/lib/rag-types';
+import {
+  RagConfigForm,
+  defaultGraphRagConfig,
+  defaultVectorRagConfig,
+} from '@/components/RagConfigForm';
+import type { GraphRagConfig, RagMode, VectorRagConfig } from '@/lib/rag-types';
 import { Link } from 'react-router-dom';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
@@ -13,7 +17,9 @@ export function ProjectsPage() {
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [creating, setCreating] = useState(false);
-  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultRagConfig());
+  const [ragMode, setRagMode] = useState<RagMode>('vector');
+  const [vectorConfig, setVectorConfig] = useState<VectorRagConfig>(defaultVectorRagConfig());
+  const [graphConfig, setGraphConfig] = useState<GraphRagConfig>(defaultGraphRagConfig());
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,7 +27,12 @@ export function ProjectsPage() {
 
     setCreating(true);
     try {
-      await createProject(newName.trim(), newDescription.trim() || undefined, ragConfig);
+      await createProject(
+        newName.trim(),
+        newDescription.trim() || undefined,
+        ragMode,
+        ragMode === 'graph' ? graphConfig : vectorConfig
+      );
       setNewName('');
       setNewDescription('');
       setShowCreate(false);
@@ -38,7 +49,6 @@ export function ProjectsPage() {
 
   return (
     <div className="p-8 animate-fade-in">
-      {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-3xl font-bold">Projects</h1>
@@ -50,13 +60,14 @@ export function ProjectsPage() {
         </Button>
       </div>
 
-      {/* Create Form */}
       {showCreate && (
         <Card className="mb-8 animate-slide-up">
           <form onSubmit={handleCreate}>
             <CardHeader>
               <CardTitle>Create New Project</CardTitle>
-              <CardDescription>A project contains your documents and knowledge base</CardDescription>
+              <CardDescription>
+                Choose one RAG mode — it cannot be changed after creation
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
@@ -82,7 +93,48 @@ export function ProjectsPage() {
                   onChange={(e) => setNewDescription(e.target.value)}
                 />
               </div>
-              <RagConfigForm value={ragConfig} onChange={setRagConfig} compact />
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">RAG mode</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className={cn(
+                      'rounded-lg border p-4 text-left transition-colors',
+                      ragMode === 'vector'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-input hover:border-primary/40'
+                    )}
+                    onClick={() => setRagMode('vector')}
+                  >
+                    <div className="font-medium">Vector RAG (Qdrant)</div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Chunking + semantic / hybrid retrieval
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      'rounded-lg border p-4 text-left transition-colors',
+                      ragMode === 'graph'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-input hover:border-primary/40'
+                    )}
+                    onClick={() => setRagMode('graph')}
+                  >
+                    <div className="font-medium">Graph RAG (Neo4j)</div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Entity graph + graph traversal retrieval
+                    </p>
+                  </button>
+                </div>
+              </div>
+
+              {ragMode === 'vector' ? (
+                <RagConfigForm mode="vector" value={vectorConfig} onChange={setVectorConfig} compact />
+              ) : (
+                <RagConfigForm mode="graph" value={graphConfig} onChange={setGraphConfig} compact />
+              )}
             </CardContent>
             <CardFooter className="flex gap-3">
               <Button type="submit" isLoading={creating}>
@@ -96,7 +148,6 @@ export function ProjectsPage() {
         </Card>
       )}
 
-      {/* Projects Grid */}
       {isLoading ? (
         <div className="flex items-center justify-center py-20">
           <div className="animate-spin rounded-full h-8 w-8 border-2 border-primary border-t-transparent" />
@@ -126,7 +177,8 @@ export function ProjectsPage() {
                     <div>
                       <CardTitle className="text-lg">{project.name}</CardTitle>
                       <CardDescription className="text-xs">
-                        Created {formatRelativeTime(project.created_at)}
+                        {project.rag_mode === 'graph' ? 'Graph RAG' : 'Vector RAG'} ·{' '}
+                        {formatRelativeTime(project.created_at)}
                       </CardDescription>
                     </div>
                   </div>
@@ -146,9 +198,9 @@ export function ProjectsPage() {
                 </p>
               </CardContent>
               <CardFooter className="flex gap-2">
-                <Link 
+                <Link
                   to={`/projects/${project.id}`}
-                  className={cn(buttonVariants({ size: 'sm' }), "flex-1")}
+                  className={cn(buttonVariants({ size: 'sm' }), 'flex-1')}
                 >
                   <FolderOpen className="h-4 w-4 mr-2" />
                   Open Project

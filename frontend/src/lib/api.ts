@@ -1,5 +1,5 @@
 import axios, { type AxiosError, type AxiosInstance } from 'axios';
-import type { DocumentStatus, RagConfig, RetrievalOverrides } from './rag-types';
+import type { DocumentStatus, GraphRagConfig, RagConfig, RagMode, RetrievalOverrides, VectorRagConfig, GraphIndexStatus } from './rag-types';
 
 const API_BASE_URL = '/api';
 
@@ -115,7 +115,9 @@ export interface Project {
   name: string;
   description: string | null;
   owner_id: string;
+  rag_mode: RagMode;
   rag_config: RagConfig;
+  graph_index_status?: GraphIndexStatus | null;
   document_count?: number;
   created_at: string;
   updated_at: string;
@@ -129,7 +131,8 @@ export interface ProjectListResponse {
 export interface CreateProject {
   name: string;
   description?: string;
-  rag_config?: RagConfig;
+  rag_mode?: RagMode;
+  rag_config?: VectorRagConfig | GraphRagConfig;
 }
 
 export const projectsApi = {
@@ -252,16 +255,21 @@ export interface RetrievalQueryResponse {
 }
 
 export const ragApi = {
-  getOptions: async (): Promise<{
+  getOptions: async (
+    mode: RagMode = 'vector'
+  ): Promise<{
+    mode: RagMode;
     defaults: RagConfig;
     extraction_strategies: string[];
-    chunking_strategies: string[];
+    chunking_strategies?: string[];
     retrieval_strategies: string[];
-    reranking_strategies: string[];
-    chunking_params: Record<string, Record<string, number | null>>;
+    reranking_strategies?: string[];
+    chunking_params?: Record<string, Record<string, number | null>>;
     retrieval_params: Record<string, Record<string, unknown>>;
+    indexing_params?: Record<string, unknown>;
+    extraction_params?: Record<string, unknown>;
   }> => {
-    const { data } = await api.get('/rag/options');
+    const { data } = await api.get('/rag/options', { params: { mode } });
     return data;
   },
 };

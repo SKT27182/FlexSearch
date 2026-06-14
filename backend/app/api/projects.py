@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
-from app.db.models import Document, DocumentStatus, Project, User
+from app.db.models import Document, DocumentStatus, Project, User, RagMode
 from app.schemas.project import (
     ProjectCreate,
     ProjectListResponse,
@@ -22,8 +22,10 @@ from app.schemas.project import (
     ReindexRequest,
     ReindexResponse,
     project_to_response,
+    resolve_create_rag_config,
 )
-from app.schemas.rag_config import RagConfig
+from app.schemas.rag_config import RagConfig, parse_rag_config
+from app.rag.pipeline import create_pipeline
 from app.services.document_tasks import schedule_process_document
 from app.services.document_worker import ReindexMode
 from app.services.project_access import (
@@ -49,16 +51,19 @@ async def create_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectResponse:
-    rag = (
-        project_data.rag_config.to_db()
-        if project_data.rag_config
-        else RagConfig.from_settings().to_db()
-    )
+    rag_mode = project_data.rag_mode
+    rag = resolve_create_rag_config(rag_mode, project_data.rag_config)
     project = Project(
         name=project_data.name,
         description=project_data.description,
         owner_id=current_user.id,
+        rag_mode=rag_mode,
         rag_config=rag,
+        graph_index_status=(
+            {"status": "pending", "entity_count": 0, "passage_count": 0}
+            if rag_mode == RagMode.GRAPH
+            else None
+        ),
     )
     db.add(project)
     await db.commit()
@@ -127,7 +132,11 @@ async def update_project(
     if project_data.description is not None:
         project.description = project_data.description
     if project_data.rag_config is not None:
-        project.rag_config = project_data.rag_config.to_db()
+        rag_mode = project.rag_mode
+        if isinstance(rag_mode, str):
+            rag_mode = RagMode(rag_mode)
+        parsed = parse_rag_config(rag_mode, project_data.rag_config.to_db())
+        project.rag_config = parsed.to_db()
 
     await db.commit()
     await db.refresh(project)
@@ -186,5 +195,17 @@ async def delete_project(
         raise HTTPException(status_code=404, detail="Project not found")
     if not user_owns_project(current_user, project):
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    rag_mode = project.rag_mode
+    if isinstance(rag_mode, str):
+        rag_mode = RagMode(rag_mode)
+    rag_config = parse_rag_config(rag_mode, project.rag_config)
+    try:
+        create_pipeline(rag_config, rag_mode=rag_mode).delete_project_data(
+            str(project.id)
+        )
+    except Exception as exc:
+        logger.error("Failed to delete project RAG data: %s", exc)
+
     await db.delete(project)
     await db.commit()

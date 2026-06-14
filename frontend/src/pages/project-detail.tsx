@@ -28,8 +28,8 @@ import { RagConfigForm } from '@/components/RagConfigForm';
 import { DocumentPreviewDialog } from '@/components/DocumentPreviewDialog';
 import { UploadProgressList } from '@/components/UploadProgressList';
 import { subscribeProjectDocuments } from '@/hooks/useDocumentStatusStream';
-import { canPreview, type DocumentStatusEvent, type RagConfig, type RetrievalOverrides } from '@/lib/rag-types';
-import { defaultRagConfig } from '@/components/RagConfigForm';
+import { canPreview, isGraphRagConfig, isVectorRagConfig, type GraphRagConfig, type VectorRagConfig, type DocumentStatusEvent, type RetrievalOverrides } from '@/lib/rag-types';
+import { defaultVectorRagConfig } from '@/components/RagConfigForm';
 
 const PROCESSING_STATUSES = new Set([
   'uploaded',
@@ -38,6 +38,7 @@ const PROCESSING_STATUSES = new Set([
   'extracted',
   'chunking',
   'indexing',
+  'graph_indexing',
 ]);
 
 export function ProjectDetailPage() {
@@ -50,7 +51,9 @@ export function ProjectDetailPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [ragDraft, setRagDraft] = useState<RagConfig>(defaultRagConfig());
+  const [ragDraft, setRagDraft] = useState<VectorRagConfig | GraphRagConfig>(
+    defaultVectorRagConfig()
+  );
   const [savingRag, setSavingRag] = useState(false);
 
   const [query, setQuery] = useState('');
@@ -256,7 +259,18 @@ export function ProjectDetailPage() {
           <h1 className="text-3xl font-bold">{project.name}</h1>
           <p className="text-muted-foreground">{project.description || 'No description'}</p>
           <p className="text-xs text-muted-foreground mt-1">
-            RAG: {project.rag_config.chunking.strategy} · {project.rag_config.retrieval.strategy}
+            {project.rag_mode === 'graph' ? 'Graph RAG (Neo4j)' : 'Vector RAG (Qdrant)'}
+            {isVectorRagConfig(project.rag_config) &&
+              ` · ${project.rag_config.chunking.strategy} · ${project.rag_config.retrieval.strategy}`}
+            {isGraphRagConfig(project.rag_config) &&
+              ` · ${project.rag_config.retrieval.strategy}`}
+            {project.rag_mode === 'graph' && project.graph_index_status && (
+              <>
+                {' '}
+                · {project.graph_index_status.entity_count ?? 0} entities ·{' '}
+                {project.graph_index_status.passage_count ?? 0} passages
+              </>
+            )}
           </p>
         </div>
         <Button variant="outline" onClick={() => setShowSettings(!showSettings)}>
@@ -275,7 +289,11 @@ export function ProjectDetailPage() {
             <CardTitle>Project RAG configuration</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <RagConfigForm value={ragDraft} onChange={setRagDraft} />
+            {project.rag_mode === 'vector' && isVectorRagConfig(ragDraft) ? (
+              <RagConfigForm mode="vector" value={ragDraft} onChange={setRagDraft} />
+            ) : project.rag_mode === 'graph' && isGraphRagConfig(ragDraft) ? (
+              <RagConfigForm mode="graph" value={ragDraft} onChange={setRagDraft} />
+            ) : null}
             <div className="flex gap-2">
               <Button onClick={handleSaveRag} isLoading={savingRag}>
                 Save settings
@@ -475,12 +493,22 @@ export function ProjectDetailPage() {
                         }
                       >
                         <option value="">Project default</option>
-                        <option value="dense">Dense (semantic)</option>
-                        <option value="bm25">BM25 (lexical)</option>
-                        <option value="hybrid">Hybrid (semantic + BM25)</option>
-                        <option value="parent_child">Parent / child</option>
+                        {project.rag_mode === 'graph' ? (
+                          <>
+                            <option value="graph_local">Graph local</option>
+                            <option value="graph_global">Graph global</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="dense">Dense (semantic)</option>
+                            <option value="bm25">BM25 (lexical)</option>
+                            <option value="hybrid">Hybrid (semantic + BM25)</option>
+                            <option value="parent_child">Parent / child</option>
+                          </>
+                        )}
                       </select>
                     </div>
+                    {project.rag_mode === 'vector' && (
                     <div>
                       <label className="text-xs font-medium">Reranking override</label>
                       <select
@@ -500,6 +528,7 @@ export function ProjectDetailPage() {
                         <option value="cross_encoder">Cross-encoder</option>
                       </select>
                     </div>
+                    )}
                   </div>
                 )}
 

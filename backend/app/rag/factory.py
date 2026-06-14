@@ -2,6 +2,7 @@
 Build RAG strategy instances from RagConfig.
 """
 
+from app.db.models import RagMode
 from app.rag.chunking import (
     BaseChunkingStrategy,
     FixedWindowChunking,
@@ -15,6 +16,8 @@ from app.rag.reranking import BaseRerankingStrategy, CrossEncoderReranking, NoRe
 from app.rag.retrieval import (
     BaseRetrievalStrategy,
     DenseRetrieval,
+    GraphGlobalRetrieval,
+    GraphLocalRetrieval,
     HybridRetrieval,
     ParentChildRetrieval,
     SparseRetrieval,
@@ -22,13 +25,19 @@ from app.rag.retrieval import (
 from app.schemas.rag_config import (
     ChunkingConfig,
     ExtractionConfig,
+    GraphExtractionConfig,
+    GraphRagConfig,
+    GraphRetrievalConfig,
     RagConfig,
     RerankingConfig,
     RetrievalConfig,
+    VectorRagConfig,
 )
 
 
-def build_extraction_strategy(config: ExtractionConfig) -> BaseExtractionStrategy:
+def build_extraction_strategy(
+    config: ExtractionConfig | GraphExtractionConfig,
+) -> BaseExtractionStrategy:
     if config.strategy == "vlm":
         return VLMExtractionStrategy()
     return OCRExtractionStrategy()
@@ -61,7 +70,13 @@ def build_chunking_strategy(config: ChunkingConfig) -> BaseChunkingStrategy:
             )
 
 
-def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
+def build_retrieval_strategy(
+    config: RetrievalConfig,
+    *,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> BaseRetrievalStrategy:
+    if rag_mode == RagMode.GRAPH:
+        raise ValueError("Use build_graph_retrieval_strategy for graph projects")
     params = config.resolved_params()
     match config.strategy:
         case "parent_child":
@@ -74,7 +89,21 @@ def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
             return DenseRetrieval(score_threshold=params.score_threshold)
 
 
-def build_reranking_strategy(config: RerankingConfig) -> BaseRerankingStrategy:
+def build_graph_retrieval_strategy(
+    config: GraphRetrievalConfig,
+) -> BaseRetrievalStrategy:
+    if config.strategy == "graph_global":
+        return GraphGlobalRetrieval(config)
+    return GraphLocalRetrieval(config)
+
+
+def build_reranking_strategy(
+    config: RerankingConfig,
+    *,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> BaseRerankingStrategy:
+    if rag_mode == RagMode.GRAPH:
+        return NoReranking()
     if config.strategy == "cross_encoder":
         model_name = config.params.get(
             "model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -83,15 +112,28 @@ def build_reranking_strategy(config: RerankingConfig) -> BaseRerankingStrategy:
     return NoReranking()
 
 
-def build_pipeline_strategies(rag_config: RagConfig) -> tuple[
+def build_pipeline_strategies(
+    rag_config: VectorRagConfig | GraphRagConfig,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> tuple[
     BaseExtractionStrategy,
-    BaseChunkingStrategy,
+    BaseChunkingStrategy | None,
     BaseRetrievalStrategy,
     BaseRerankingStrategy,
 ]:
+    extraction = build_extraction_strategy(rag_config.extraction)
+    if rag_mode == RagMode.GRAPH:
+        assert isinstance(rag_config, GraphRagConfig)
+        return (
+            extraction,
+            None,
+            build_graph_retrieval_strategy(rag_config.retrieval),
+            NoReranking(),
+        )
+    assert isinstance(rag_config, VectorRagConfig)
     return (
-        build_extraction_strategy(rag_config.extraction),
+        extraction,
         build_chunking_strategy(rag_config.chunking),
-        build_retrieval_strategy(rag_config.retrieval),
-        build_reranking_strategy(rag_config.reranking),
+        build_retrieval_strategy(rag_config.retrieval, rag_mode=rag_mode),
+        build_reranking_strategy(rag_config.reranking, rag_mode=rag_mode),
     )

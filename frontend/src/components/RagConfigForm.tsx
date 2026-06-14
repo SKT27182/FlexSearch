@@ -1,30 +1,45 @@
 import { useEffect } from 'react';
 import { ragApi } from '@/lib/api';
-import type { ChunkingStrategy, RagConfig, RetrievalStrategy } from '@/lib/rag-types';
+import type {
+  ChunkingStrategy,
+  GraphRagConfig,
+  VectorRagConfig,
+  VectorRetrievalStrategy,
+} from '@/lib/rag-types';
+import { defaultGraphRagConfig, defaultVectorRagConfig } from '@/lib/rag-types';
 import { Input } from '@/components/ui';
 
-interface RagConfigFormProps {
-  value: RagConfig;
-  onChange: (config: RagConfig) => void;
+interface VectorRagConfigFormProps {
+  mode: 'vector';
+  value: VectorRagConfig;
+  onChange: (config: VectorRagConfig) => void;
   compact?: boolean;
 }
 
-const defaultConfig = (): RagConfig => ({
-  extraction: { strategy: 'ocr' },
-  chunking: { strategy: 'fixed_window', params: { chunk_size: 512, overlap: 50 } },
-  retrieval: { strategy: 'dense', params: {} },
-  reranking: { strategy: 'none', params: {} },
-});
+interface GraphRagConfigFormProps {
+  mode: 'graph';
+  value: GraphRagConfig;
+  onChange: (config: GraphRagConfig) => void;
+  compact?: boolean;
+}
 
-export function RagConfigForm({ value, onChange, compact }: RagConfigFormProps) {
+type RagConfigFormProps = VectorRagConfigFormProps | GraphRagConfigFormProps;
+
+export function RagConfigForm(props: RagConfigFormProps) {
   useEffect(() => {
-    ragApi.getOptions().catch(() => undefined);
-  }, []);
+    ragApi.getOptions(props.mode).catch(() => undefined);
+  }, [props.mode]);
 
-  const update = (partial: Partial<RagConfig>) => {
+  if (props.mode === 'graph') {
+    return <GraphForm {...props} />;
+  }
+  return <VectorForm {...props} />;
+}
+
+function VectorForm({ value, onChange, compact }: VectorRagConfigFormProps) {
+  const update = (partial: Partial<VectorRagConfig>) => {
     onChange({ ...value, ...partial });
   };
-
   const label = compact ? 'text-xs' : 'text-sm';
 
   return (
@@ -76,47 +91,6 @@ export function RagConfigForm({ value, onChange, compact }: RagConfigFormProps) 
           <option value="semantic">Semantic</option>
           <option value="parent_child">Parent / child</option>
         </select>
-        {(value.chunking.strategy === 'fixed_window' ||
-          value.chunking.strategy === 'recursive') && (
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs text-muted-foreground">Chunk size</label>
-              <Input
-                type="number"
-                value={Number(value.chunking.params.chunk_size ?? 512)}
-                onChange={(e) =>
-                  update({
-                    chunking: {
-                      ...value.chunking,
-                      params: {
-                        ...value.chunking.params,
-                        chunk_size: Number(e.target.value),
-                      },
-                    },
-                  })
-                }
-              />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground">Overlap</label>
-              <Input
-                type="number"
-                value={Number(value.chunking.params.overlap ?? 50)}
-                onChange={(e) =>
-                  update({
-                    chunking: {
-                      ...value.chunking,
-                      params: {
-                        ...value.chunking.params,
-                        overlap: Number(e.target.value),
-                      },
-                    },
-                  })
-                }
-              />
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="space-y-2">
@@ -125,13 +99,13 @@ export function RagConfigForm({ value, onChange, compact }: RagConfigFormProps) 
           className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
           value={value.retrieval.strategy}
           onChange={(e) => {
-            const strategy = e.target.value as RetrievalStrategy;
-            const params =
-              strategy === 'hybrid'
-                ? { rrf_k: 60 }
-                : strategy === 'bm25'
-                  ? { k1: 1.5, b: 0.75 }
-                  : {};
+            const strategy = e.target.value as VectorRetrievalStrategy;
+            let params: Record<string, number | null> = {};
+            if (strategy === 'hybrid') {
+              params = { rrf_k: 60 };
+            } else if (strategy === 'bm25') {
+              params = { k1: 1.5, b: 0.75 };
+            }
             update({ retrieval: { strategy, params } });
           }}
         >
@@ -164,4 +138,93 @@ export function RagConfigForm({ value, onChange, compact }: RagConfigFormProps) 
   );
 }
 
-export { defaultConfig as defaultRagConfig };
+function GraphForm({ value, onChange, compact }: GraphRagConfigFormProps) {
+  const update = (partial: Partial<GraphRagConfig>) => {
+    onChange({ ...value, ...partial });
+  };
+  const label = compact ? 'text-xs' : 'text-sm';
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <label className={`${label} font-medium`}>Extraction</label>
+        <select
+          className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+          value={value.extraction.strategy}
+          onChange={(e) =>
+            update({
+              extraction: {
+                ...value.extraction,
+                strategy: e.target.value as 'ocr' | 'vlm',
+              },
+            })
+          }
+        >
+          <option value="ocr">OCR</option>
+          <option value="vlm">VLM</option>
+        </select>
+      </div>
+
+      <div className="space-y-2">
+        <label className={`${label} font-medium`}>Passage size (chars)</label>
+        <Input
+          type="number"
+          value={value.extraction.passage_chunk_size}
+          onChange={(e) =>
+            update({
+              extraction: {
+                ...value.extraction,
+                passage_chunk_size: Number(e.target.value),
+              },
+            })
+          }
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label className={`${label} font-medium`}>Max entities per passage</label>
+        <Input
+          type="number"
+          value={value.indexing.max_entities_per_passage}
+          onChange={(e) =>
+            update({
+              indexing: {
+                ...value.indexing,
+                max_entities_per_passage: Number(e.target.value),
+              },
+            })
+          }
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label className={`${label} font-medium`}>Default retrieval</label>
+        <select
+          className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+          value={value.retrieval.strategy}
+          onChange={(e) =>
+            update({
+              retrieval: {
+                strategy: e.target.value as 'graph_local' | 'graph_global',
+                params:
+                  e.target.value === 'graph_global'
+                    ? { top_passages: 5 }
+                    : { max_hops: 2, top_entities: 10 },
+              },
+            })
+          }
+        >
+          <option value="graph_local">Graph local (entity-focused)</option>
+          <option value="graph_global">Graph global (thematic)</option>
+        </select>
+      </div>
+
+      <p className={`${label} text-muted-foreground`}>
+        Graph RAG requires an LLM API key for entity extraction during indexing.
+      </p>
+    </div>
+  );
+}
+
+export const defaultRagConfig = defaultVectorRagConfig;
+export { defaultVectorRagConfig, defaultGraphRagConfig };

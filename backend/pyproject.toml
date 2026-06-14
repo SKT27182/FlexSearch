@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "litellm>=1.81.5",
     "minio>=7.2.20",
+    "neo4j>=5.11.0",
     "passlib[bcrypt]>=1.7.4",
     "bcrypt==3.2.2",
     "pdf2image>=1.17.0",

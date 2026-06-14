@@ -69,8 +69,8 @@ class TestRetrievalQuery:
                 return results[:top_k], "dense", "none"
 
         monkeypatch.setattr(
-            "app.api.retrieval.get_rag_pipeline",
-            lambda config=None: FakePipeline(),
+            "app.api.retrieval.create_pipeline",
+            lambda config=None, rag_mode=None: FakePipeline(),
         )
 
         response = await async_client.post(

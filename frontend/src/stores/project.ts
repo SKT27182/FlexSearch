@@ -1,23 +1,21 @@
 import { create } from 'zustand';
 import { projectsApi, type Project } from '@/lib/api';
-import type { RagConfig } from '@/lib/rag-types';
+import type { GraphRagConfig, RagMode, VectorRagConfig } from '@/lib/rag-types';
 
 interface ProjectState {
   projects: Project[];
   currentProject: Project | null;
   isLoading: boolean;
 
-  // Actions
   fetchProjects: () => Promise<void>;
   selectProject: (project: Project | null) => void;
   createProject: (
     name: string,
     description?: string,
-    rag_config?: RagConfig
+    rag_mode?: RagMode,
+    rag_config?: VectorRagConfig | GraphRagConfig
   ) => Promise<Project>;
   deleteProject: (id: string) => Promise<void>;
-  
-  // Reset all state
   reset: () => void;
 }
 
@@ -40,8 +38,13 @@ export const useProjectStore = create<ProjectState>()((set) => ({
     set({ currentProject: project });
   },
 
-  createProject: async (name, description, rag_config) => {
-    const project = await projectsApi.create({ name, description, rag_config });
+  createProject: async (name, description, rag_mode = 'vector', rag_config) => {
+    const project = await projectsApi.create({
+      name,
+      description,
+      rag_mode,
+      rag_config,
+    });
     set((state) => ({ projects: [project, ...state.projects] }));
     return project;
   },

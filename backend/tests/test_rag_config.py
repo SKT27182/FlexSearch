@@ -1,19 +1,27 @@
 """Tests for RagConfig schemas and factory."""
 
+from app.db.models import RagMode
 from app.rag.factory import (
     build_chunking_strategy,
     build_extraction_strategy,
+    build_graph_retrieval_strategy,
     build_retrieval_strategy,
 )
+from app.rag.retrieval.graph_local import GraphLocalRetrieval
 from app.rag.retrieval.sparse import SparseRetrieval
 from app.rag.chunking import FixedWindowChunking, RecursiveChunking
 from app.schemas.rag_config import (
     ChunkingConfig,
     EffectiveRagConfig,
     ExtractionConfig,
+    GraphRagConfig,
+    GraphRetrievalConfig,
     RagConfig,
     RetrievalConfig,
+    VECTOR_RETRIEVAL_STRATEGIES,
+    GRAPH_RETRIEVAL_STRATEGIES,
     extraction_fingerprint,
+    parse_rag_config,
 )
 
 
@@ -83,3 +91,23 @@ def test_hybrid_retrieval_factory() -> None:
     r = build_retrieval_strategy(RetrievalConfig(strategy="hybrid", params={"rrf_k": 42}))
     assert r.name == "hybrid"
     assert r._rrf_k == 42
+
+
+def test_graph_retrieval_factory() -> None:
+    r = build_graph_retrieval_strategy(
+        GraphRetrievalConfig(strategy="graph_local", params={"max_hops": 2})
+    )
+    assert isinstance(r, GraphLocalRetrieval)
+    assert r.name == "graph_local"
+
+
+def test_parse_rag_config_modes() -> None:
+    vector = parse_rag_config(RagMode.VECTOR, {"chunking": {"strategy": "fixed_window"}})
+    graph = parse_rag_config(RagMode.GRAPH, {"retrieval": {"strategy": "graph_global"}})
+    assert isinstance(vector, RagConfig)
+    assert isinstance(graph, GraphRagConfig)
+
+
+def test_retrieval_strategy_sets() -> None:
+    assert "dense" in VECTOR_RETRIEVAL_STRATEGIES
+    assert "graph_local" in GRAPH_RETRIEVAL_STRATEGIES

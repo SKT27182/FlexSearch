@@ -13,20 +13,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
-from app.db.models import Project, User
-from app.rag.pipeline import get_rag_pipeline
-from app.schemas.rag_config import RagConfig
+from app.db.models import Project, RagMode, User
+from app.rag.pipeline import create_pipeline
+from app.schemas.rag_config import (
+    GRAPH_RETRIEVAL_STRATEGIES,
+    VECTOR_RETRIEVAL_STRATEGIES,
+    parse_rag_config,
+)
 from app.schemas.retrieval import (
     RetrievedChunk,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
 )
+from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
 from app.services.project_access import user_can_access_project
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__, level=settings.log_level)
 
 router = APIRouter(prefix="/retrieval", tags=["retrieval"])
+
+
+def _validate_strategy_for_mode(rag_mode: RagMode, strategy: str) -> None:
+    if rag_mode == RagMode.GRAPH:
+        if strategy not in GRAPH_RETRIEVAL_STRATEGIES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Strategy '{strategy}' is not valid for graph projects",
+            )
+    elif strategy not in VECTOR_RETRIEVAL_STRATEGIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Strategy '{strategy}' is not valid for vector projects",
+        )
 
 
 @router.post("/query", response_model=RetrievalQueryResponse)
@@ -52,14 +71,43 @@ async def query_retrieval(
     if not user_can_access_project(current_user, project):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    rag_config = RagConfig.from_db(project.rag_config)
-    pipeline = get_rag_pipeline(rag_config)
-    results, retrieval_name, rerank_name = await pipeline.retrieve(
-        query=request.query,
-        project_id=request.project_id,
-        top_k=request.top_k,
-        overrides=request.overrides,
-    )
+    rag_mode = project.rag_mode
+    if isinstance(rag_mode, str):
+        rag_mode = RagMode(rag_mode)
+
+    rag_config = parse_rag_config(rag_mode, project.rag_config)
+    effective_strategy = rag_config.retrieval.strategy
+    if request.overrides and request.overrides.retrieval_strategy is not None:
+        effective_strategy = request.overrides.retrieval_strategy
+    _validate_strategy_for_mode(rag_mode, effective_strategy)
+
+    if rag_mode == RagMode.GRAPH:
+        try:
+            stats = get_neo4j_store().get_stats(request.project_id)
+        except Neo4jStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        if stats.passage_count == 0 and stats.entity_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Graph index not ready — upload and process documents first",
+            )
+
+    pipeline = create_pipeline(rag_config, rag_mode=rag_mode)
+    try:
+        results, retrieval_name, rerank_name = await pipeline.retrieve(
+            query=request.query,
+            project_id=request.project_id,
+            top_k=request.top_k,
+            overrides=request.overrides,
+        )
+    except Neo4jStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
     chunks = [
         RetrievedChunk(

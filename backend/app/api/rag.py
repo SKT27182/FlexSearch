@@ -1,12 +1,12 @@
 """RAG configuration metadata for UI forms."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import get_current_active_user
-from app.db.models import User
-from app.schemas.rag_config import RagConfig
+from app.db.models import RagMode, User
+from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -14,9 +14,31 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 @router.get("/options")
 async def get_rag_options(
     _: Annotated[User, Depends(get_current_active_user)],
+    mode: Literal["vector", "graph"] = Query(default="vector"),
 ) -> dict:
-    defaults = RagConfig.from_settings()
+    if mode == "graph":
+        defaults = GraphRagConfig.from_settings()
+        return {
+            "mode": "graph",
+            "defaults": defaults.model_dump(mode="json"),
+            "extraction_strategies": ["ocr", "vlm"],
+            "retrieval_strategies": ["graph_local", "graph_global"],
+            "indexing_params": {
+                "max_entities_per_passage": 20,
+                "embed_entities": True,
+            },
+            "extraction_params": {
+                "passage_chunk_size": 800,
+            },
+            "retrieval_params": {
+                "graph_local": {"max_hops": 2, "top_entities": 10},
+                "graph_global": {"top_passages": 5},
+            },
+        }
+
+    defaults = VectorRagConfig.from_settings()
     return {
+        "mode": "vector",
         "defaults": defaults.model_dump(mode="json"),
         "extraction_strategies": ["ocr", "vlm"],
         "chunking_strategies": [

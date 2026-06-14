@@ -36,8 +36,16 @@ class DocumentStatus(str, enum.Enum):
     EXTRACTED = "extracted"
     CHUNKING = "chunking"
     INDEXING = "indexing"
+    GRAPH_INDEXING = "graph_indexing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class RagMode(str, enum.Enum):
+    """Mutually exclusive RAG pipeline mode per project."""
+
+    VECTOR = "vector"
+    GRAPH = "graph"
 
 
 class User(Base):
@@ -118,6 +126,15 @@ class Project(Base):
         JSON,
         nullable=False,
         default=dict,
+    )
+    rag_mode: Mapped[RagMode] = mapped_column(
+        Enum(RagMode, native_enum=False, length=16),
+        default=RagMode.VECTOR,
+        nullable=False,
+    )
+    graph_index_status: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

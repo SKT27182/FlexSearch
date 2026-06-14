@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentStatus, Project
+from app.core.config import settings
+from app.db.models import Document, DocumentStatus, Project, RagMode
 from app.db.postgres import async_session_maker
+from app.rag.graph.indexer import GraphIndexer
 from app.rag.pipeline import create_pipeline
-from app.schemas.rag_config import RagConfig, extraction_fingerprint
+from app.schemas.rag_config import (
+    GraphRagConfig,
+    VectorRagConfig,
+    extraction_fingerprint,
+    parse_rag_config,
+)
 from app.services.document_status import update_document_status
 from app.services.document_storage import (
     build_extracted_meta,
@@ -20,6 +28,7 @@ from app.services.document_storage import (
     extracted_meta_key,
     meta_to_bytes,
 )
+from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
 from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
 
@@ -34,12 +43,48 @@ class ReindexMode(str, Enum):
     FROM_EXTRACTED = "from_extracted"
 
 
-async def get_project_rag_config(db: AsyncSession, project_id: UUID) -> RagConfig:
+async def get_project_rag_context(
+    db: AsyncSession, project_id: UUID
+) -> tuple[RagMode, VectorRagConfig | GraphRagConfig, Project]:
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise ValueError(f"Project not found: {project_id}")
-    return RagConfig.from_db(project.rag_config)
+    rag_mode = project.rag_mode
+    if isinstance(rag_mode, str):
+        rag_mode = RagMode(rag_mode)
+    config = parse_rag_config(rag_mode, project.rag_config)
+    return rag_mode, config, project
+
+
+async def get_project_rag_config(
+    db: AsyncSession, project_id: UUID
+) -> VectorRagConfig | GraphRagConfig:
+    _, config, _ = await get_project_rag_context(db, project_id)
+    return config
+
+
+async def _update_graph_index_status(
+    db: AsyncSession,
+    project: Project,
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    stats = get_neo4j_store().get_stats(str(project.id))
+    project.graph_index_status = {
+        "status": status,
+        "indexed_at": datetime.now(timezone.utc).isoformat(),
+        "entity_count": stats.entity_count,
+        "passage_count": stats.passage_count,
+        "error": error,
+        "fingerprint": (
+            parse_rag_config(project.rag_mode, project.rag_config).ingestion_fingerprint()
+            if project.rag_config
+            else None
+        ),
+    }
+    await db.commit()
 
 
 async def process_document(
@@ -61,10 +106,21 @@ async def process_document(
             logger.error("Document %s not found", document_id)
             return
 
-        rag_config = await get_project_rag_config(db, project_id)
-        pipeline = create_pipeline(rag_config)
+        rag_mode, rag_config, project = await get_project_rag_context(db, project_id)
+        pipeline = create_pipeline(rag_config, rag_mode=rag_mode)
         storage = get_storage_service()
         ext_hash = extraction_fingerprint(rag_config.extraction)
+
+        if rag_mode == RagMode.GRAPH and not settings.api_key:
+            await update_document_status(
+                db,
+                document,
+                status=DocumentStatus.FAILED,
+                processing_step="Graph RAG requires LLM API key",
+                progress_pct=0,
+                error_message="Set API_KEY in backend/.env for Graph RAG indexing",
+            )
+            return
 
         try:
             md_key = extracted_md_key(project_id, document_id)
@@ -84,9 +140,14 @@ async def process_document(
                     can_skip_extract = True
 
             if can_skip_extract:
-                await _run_chunk_and_index(
-                    db, document, pipeline, storage, rag_config, ext_hash
-                )
+                if rag_mode == RagMode.GRAPH:
+                    await _run_graph_index(
+                        db, document, project, rag_config, storage, ext_hash
+                    )
+                else:
+                    await _run_chunk_and_index(
+                        db, document, pipeline, storage, rag_config, ext_hash
+                    )
                 return
 
             await update_document_status(
@@ -172,10 +233,42 @@ async def process_document(
                 extracted_at=datetime.now(timezone.utc),
             )
 
-            await _run_chunk_and_index(
-                db, document, pipeline, storage, rag_config, ext_hash, extracted.text, extracted.page_count
-            )
+            if rag_mode == RagMode.GRAPH:
+                await _run_graph_index(
+                    db,
+                    document,
+                    project,
+                    rag_config,
+                    storage,
+                    ext_hash,
+                    extracted.text,
+                    extracted.page_count,
+                )
+            else:
+                await _run_chunk_and_index(
+                    db,
+                    document,
+                    pipeline,
+                    storage,
+                    rag_config,
+                    ext_hash,
+                    extracted.text,
+                    extracted.page_count,
+                )
 
+        except Neo4jStoreError as exc:
+            logger.exception("Neo4j error processing document %s", document_id)
+            await _update_graph_index_status(
+                db, project, status="failed", error=str(exc)
+            )
+            await update_document_status(
+                db,
+                document,
+                status=DocumentStatus.FAILED,
+                processing_step="Neo4j unavailable",
+                progress_pct=0,
+                error_message=str(exc),
+            )
         except Exception as exc:
             logger.exception("Document processing failed: %s", document_id)
             await update_document_status(
@@ -193,12 +286,14 @@ async def _run_chunk_and_index(
     document: Document,
     pipeline,
     storage,
-    rag_config: RagConfig,
+    rag_config: VectorRagConfig,
     ext_hash: str,
     text: str | None = None,
     page_count: int = 0,
 ) -> None:
-    pipeline.delete_document_data(str(document.id))
+    pipeline.delete_document_data(
+        str(document.id), project_id=str(document.project_id)
+    )
 
     if text is None:
         path = document.extracted_text_path or extracted_md_key(
@@ -239,4 +334,54 @@ async def _run_chunk_and_index(
         processing_step="Done",
         progress_pct=100,
         chunk_count=chunk_count,
+    )
+
+
+async def _run_graph_index(
+    db: AsyncSession,
+    document: Document,
+    project: Project,
+    rag_config: GraphRagConfig,
+    storage,
+    ext_hash: str,
+    text: str | None = None,
+    page_count: int = 0,
+) -> None:
+    del ext_hash, page_count
+    if text is None:
+        path = document.extracted_text_path or extracted_md_key(
+            document.project_id, document.id
+        )
+        if not storage.file_exists(path):
+            raise FileNotFoundError(f"Extracted text missing: {path}")
+        text = storage.download_file(path).decode("utf-8")
+
+    await update_document_status(
+        db,
+        document,
+        status=DocumentStatus.GRAPH_INDEXING,
+        processing_step="Extracting entities and indexing graph…",
+        progress_pct=75,
+        clear_error=True,
+    )
+    await _update_graph_index_status(db, project, status="indexing")
+
+    indexer = GraphIndexer()
+    stats = await indexer.index_document(
+        str(project.id),
+        str(document.id),
+        document.filename,
+        text,
+        rag_config,
+    )
+
+    await _update_graph_index_status(db, project, status="ready")
+
+    await update_document_status(
+        db,
+        document,
+        status=DocumentStatus.COMPLETED,
+        processing_step="Graph indexed",
+        progress_pct=100,
+        chunk_count=stats.passage_count,
     )
