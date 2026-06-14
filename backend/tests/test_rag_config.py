@@ -83,3 +83,14 @@ def test_hybrid_retrieval_factory() -> None:
     r = build_retrieval_strategy(RetrievalConfig(strategy="hybrid", params={"rrf_k": 42}))
     assert r.name == "hybrid"
     assert r._rrf_k == 42
+
+
+def test_graph_local_retrieval_factory() -> None:
+    from app.rag.retrieval.graph_local import GraphLocalRetrieval
+
+    r = build_retrieval_strategy(
+        RetrievalConfig(strategy="graph_local", params={"community_level": 3})
+    )
+    assert isinstance(r, GraphLocalRetrieval)
+    assert r.name == "graph_local"
+    assert r._community_level == 3

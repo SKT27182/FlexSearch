@@ -13,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
-from app.db.models import Project, User
+from app.db.models import Project, User, RagMode
 from app.rag.pipeline import get_rag_pipeline
+from app.schemas.graph_index import GraphIndexState
 from app.schemas.rag_config import RagConfig
 from app.schemas.retrieval import (
     RetrievedChunk,
@@ -22,6 +23,7 @@ from app.schemas.retrieval import (
     RetrievalQueryResponse,
 )
 from app.services.project_access import user_can_access_project
+from app.services.retrieval_validation import validate_retrieval_for_mode
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__, level=settings.log_level)
@@ -53,6 +55,20 @@ async def query_retrieval(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     rag_config = RagConfig.from_db(project.rag_config)
+    validation_error = validate_retrieval_for_mode(
+        project.rag_mode, rag_config, request.overrides
+    )
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    if project.rag_mode == RagMode.GRAPH:
+        graph_state = GraphIndexState.from_db(project.graph_index)
+        if graph_state.status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="Graph index is not ready. Wait for indexing to complete.",
+            )
+
     pipeline = get_rag_pipeline(rag_config)
     results, retrieval_name, rerank_name = await pipeline.retrieve(
         query=request.query,

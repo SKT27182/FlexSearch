@@ -11,6 +11,8 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Download,
+  Network,
 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
 import { Button, Card, CardHeader, CardTitle, CardContent, buttonVariants, Input } from '@/components/ui';
@@ -28,8 +30,8 @@ import { RagConfigForm } from '@/components/RagConfigForm';
 import { DocumentPreviewDialog } from '@/components/DocumentPreviewDialog';
 import { UploadProgressList } from '@/components/UploadProgressList';
 import { subscribeProjectDocuments } from '@/hooks/useDocumentStatusStream';
-import { canPreview, type DocumentStatusEvent, type RagConfig, type RetrievalOverrides } from '@/lib/rag-types';
-import { defaultRagConfig } from '@/components/RagConfigForm';
+import { canPreview, isGraphMode, type DocumentStatusEvent, type RagConfig, type RagMode, type RetrievalOverrides } from '@/lib/rag-types';
+import { defaultRagConfigForMode } from '@/components/RagConfigForm';
 
 const PROCESSING_STATUSES = new Set([
   'uploaded',
@@ -50,8 +52,10 @@ export function ProjectDetailPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [ragDraft, setRagDraft] = useState<RagConfig>(defaultRagConfig());
+  const [ragDraft, setRagDraft] = useState<RagConfig>(defaultRagConfigForMode('vector'));
   const [savingRag, setSavingRag] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState(false);
+  const [graphExporting, setGraphExporting] = useState(false);
 
   const [query, setQuery] = useState('');
   const [topK, setTopK] = useState(5);
@@ -196,6 +200,10 @@ export function ProjectDetailPage() {
   const handleQuery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || !id) return;
+    if (isGraphMode(project?.rag_mode) && project?.graph_index.status !== 'ready') {
+      alert('Graph index is not ready yet. Wait for indexing to complete.');
+      return;
+    }
     setIsQuerying(true);
     setHasQueried(true);
     try {
@@ -211,6 +219,7 @@ export function ProjectDetailPage() {
       );
     } catch (error) {
       console.error('Query failed:', error);
+      alert('Query failed. Check console for details.');
     } finally {
       setIsQuerying(false);
     }
@@ -223,6 +232,46 @@ export function ProjectDetailPage() {
       return <Loader2 className="h-4 w-4 text-primary animate-spin" />;
     return null;
   };
+
+  const handleSwitchMode = async (newMode: RagMode) => {
+    if (!id || !project) return;
+    if (
+      !confirm(
+        `Switch to ${newMode === 'graph' ? 'Graph RAG' : 'Traditional RAG'}? This wipes the current index and reprocesses all documents.`
+      )
+    ) {
+      return;
+    }
+    setSwitchingMode(true);
+    try {
+      await projectsApi.switchRagMode(id, newMode);
+      await loadData();
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
+
+  const handleGraphExport = async () => {
+    if (!id) return;
+    setGraphExporting(true);
+    try {
+      const blob = await projectsApi.downloadGraphExport(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-export-${id}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Graph export failed. Is the graph index ready?');
+    } finally {
+      setGraphExporting(false);
+    }
+  };
+
+  const isGraphProject = isGraphMode(project?.rag_mode);
+  const graphReady = project?.graph_index.status === 'ready';
 
   if (isLoading) {
     return (
@@ -256,7 +305,22 @@ export function ProjectDetailPage() {
           <h1 className="text-3xl font-bold">{project.name}</h1>
           <p className="text-muted-foreground">{project.description || 'No description'}</p>
           <p className="text-xs text-muted-foreground mt-1">
-            RAG: {project.rag_config.chunking.strategy} · {project.rag_config.retrieval.strategy}
+            {isGraphProject ? 'Graph RAG' : 'Vector RAG'} ·{' '}
+            {project.rag_config.retrieval.strategy}
+            {isGraphProject && (
+              <>
+                {' '}
+                · graph index:{' '}
+                <span
+                  className={cn(
+                    project.graph_index.status === 'ready' && 'text-emerald-600',
+                    project.graph_index.status === 'failed' && 'text-destructive'
+                  )}
+                >
+                  {project.graph_index.status}
+                </span>
+              </>
+            )}
           </p>
         </div>
         <Button variant="outline" onClick={() => setShowSettings(!showSettings)}>
@@ -275,8 +339,12 @@ export function ProjectDetailPage() {
             <CardTitle>Project RAG configuration</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <RagConfigForm value={ragDraft} onChange={setRagDraft} />
-            <div className="flex gap-2">
+            <RagConfigForm
+              value={ragDraft}
+              onChange={setRagDraft}
+              ragMode={project.rag_mode}
+            />
+            <div className="flex flex-wrap gap-2 items-center">
               <Button onClick={handleSaveRag} isLoading={savingRag}>
                 Save settings
               </Button>
@@ -291,6 +359,36 @@ export function ProjectDetailPage() {
               >
                 Reprocess all (full)
               </Button>
+              {isGraphProject && (
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    if (!id) return;
+                    await projectsApi.rebuildGraphIndex(id);
+                    await loadData();
+                  }}
+                >
+                  Rebuild graph index
+                </Button>
+              )}
+              <div className="ml-auto flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={switchingMode || project.rag_mode === 'vector'}
+                  onClick={() => handleSwitchMode('vector')}
+                >
+                  Switch to Vector RAG
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={switchingMode || project.rag_mode === 'graph'}
+                  onClick={() => handleSwitchMode('graph')}
+                >
+                  Switch to Graph RAG
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -411,6 +509,59 @@ export function ProjectDetailPage() {
         }
         main={
           <div className="space-y-8">
+            {isGraphProject && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Network className="h-5 w-5" />
+                    Visualize graph
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <p className="text-muted-foreground">
+                    Download parquet + GraphML, then open in an external tool. Graph index:{' '}
+                    <strong>{project.graph_index.status}</strong>
+                    {project.graph_index.error && (
+                      <span className="text-destructive block mt-1">
+                        {project.graph_index.error}
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!graphReady || graphExporting}
+                      onClick={handleGraphExport}
+                    >
+                      {graphExporting ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      ) : (
+                        <Download className="h-4 w-4 mr-2" />
+                      )}
+                      Download graph export
+                    </Button>
+                    <a
+                      href="https://noworneverev.github.io/graphrag-visualizer/"
+                      target="_blank"
+                      rel="noreferrer"
+                      className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+                    >
+                      GraphRAG Visualizer
+                    </a>
+                    <a
+                      href="https://microsoft.github.io/graphrag/guides/visualization"
+                      target="_blank"
+                      rel="noreferrer"
+                      className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+                    >
+                      Gephi guide
+                    </a>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             <Card className="shadow-md">
               <CardHeader>
                 <CardTitle>Search Knowledge Base</CardTitle>
@@ -440,7 +591,7 @@ export function ProjectDetailPage() {
                       }}
                     />
                   </div>
-                  <Button type="submit" disabled={isQuerying || !query.trim()}>
+                  <Button type="submit" disabled={isQuerying || !query.trim() || (isGraphProject && !graphReady)}>
                     {isQuerying ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
@@ -475,12 +626,22 @@ export function ProjectDetailPage() {
                         }
                       >
                         <option value="">Project default</option>
-                        <option value="dense">Dense (semantic)</option>
-                        <option value="bm25">BM25 (lexical)</option>
-                        <option value="hybrid">Hybrid (semantic + BM25)</option>
-                        <option value="parent_child">Parent / child</option>
+                        {isGraphProject ? (
+                          <>
+                            <option value="graph_local">Graph local</option>
+                            <option value="graph_global">Graph global</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="dense">Dense (semantic)</option>
+                            <option value="bm25">BM25 (lexical)</option>
+                            <option value="hybrid">Hybrid (semantic + BM25)</option>
+                            <option value="parent_child">Parent / child</option>
+                          </>
+                        )}
                       </select>
                     </div>
+                    {!isGraphProject && (
                     <div>
                       <label className="text-xs font-medium">Reranking override</label>
                       <select
@@ -500,6 +661,7 @@ export function ProjectDetailPage() {
                         <option value="cross_encoder">Cross-encoder</option>
                       </select>
                     </div>
+                    )}
                   </div>
                 )}
 

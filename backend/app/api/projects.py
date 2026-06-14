@@ -4,21 +4,28 @@ FlexSearch Backend - Projects API Router
 Project CRUD endpoints.
 """
 
+import io
+import zipfile
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
-from app.db.models import Document, DocumentStatus, Project, User
+from app.db.models import Document, DocumentStatus, Project, RagMode, User
+from app.schemas.graph_index import GraphIndexState, GraphIndexStatusResponse
 from app.schemas.project import (
     ProjectCreate,
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdate,
+    RagModeSwitchRequest,
+    RagModeSwitchResponse,
     ReindexRequest,
     ReindexResponse,
     project_to_response,
@@ -26,11 +33,20 @@ from app.schemas.project import (
 from app.schemas.rag_config import RagConfig
 from app.services.document_tasks import schedule_process_document
 from app.services.document_worker import ReindexMode
+from app.services.graph_index_tasks import schedule_graph_index_rebuild
+from app.services.graphrag_workspace import (
+    GRAPHML_CANDIDATES,
+    PARQUET_FILES,
+    get_graphrag_workspace,
+    graphrag_storage_prefix,
+)
 from app.services.project_access import (
     has_admin_access,
     user_can_access_project,
     user_owns_project,
 )
+from app.services.project_index_service import wipe_index_for_mode
+from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__, level=settings.log_level)
@@ -43,22 +59,39 @@ async def _doc_count(db: AsyncSession, project_id: UUID) -> int:
     return (await db.execute(q)).scalar() or 0
 
 
+async def _get_owned_project(
+    db: AsyncSession,
+    project_id: UUID,
+    current_user: User,
+) -> Project:
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not user_owns_project(current_user, project):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return project
+
+
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     project_data: ProjectCreate,
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectResponse:
+    rag_mode = RagMode(project_data.rag_mode)
     rag = (
         project_data.rag_config.to_db()
         if project_data.rag_config
-        else RagConfig.from_settings().to_db()
+        else RagConfig.for_mode(rag_mode).to_db()
     )
     project = Project(
         name=project_data.name,
         description=project_data.description,
         owner_id=current_user.id,
+        rag_mode=rag_mode,
         rag_config=rag,
+        graph_index=GraphIndexState().to_db(),
     )
     db.add(project)
     await db.commit()
@@ -188,3 +221,137 @@ async def delete_project(
         raise HTTPException(status_code=403, detail="Not authorized")
     await db.delete(project)
     await db.commit()
+
+
+@router.get("/{project_id}/graph-index/status", response_model=GraphIndexStatusResponse)
+async def get_graph_index_status(
+    project_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> GraphIndexStatusResponse:
+    project = await _get_owned_project(db, project_id, current_user)
+    if project.rag_mode != RagMode.GRAPH:
+        raise HTTPException(
+            status_code=400,
+            detail="Graph index status is only available for graph projects",
+        )
+    state = GraphIndexState.from_db(project.graph_index)
+    return GraphIndexStatusResponse(
+        status=state.status,
+        indexed_at=state.indexed_at,
+        fingerprint=state.fingerprint,
+        error=state.error,
+        document_count=state.document_count,
+    )
+
+
+@router.post("/{project_id}/graph-index/rebuild", response_model=GraphIndexStatusResponse)
+async def rebuild_graph_index(
+    project_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> GraphIndexStatusResponse:
+    project = await _get_owned_project(db, project_id, current_user)
+    if project.rag_mode != RagMode.GRAPH:
+        raise HTTPException(status_code=400, detail="Project is not in graph mode")
+    project.graph_index = GraphIndexState(status="indexing").to_db()
+    await db.commit()
+    schedule_graph_index_rebuild(project_id, debounce_seconds=0.0)
+    state = GraphIndexState.from_db(project.graph_index)
+    return GraphIndexStatusResponse(
+        status="indexing" if state.status != "disabled" else state.status,
+        indexed_at=state.indexed_at,
+        fingerprint=state.fingerprint,
+        error=state.error,
+        document_count=state.document_count,
+    )
+
+
+@router.get("/{project_id}/graph-export")
+async def export_graph(
+    project_id: UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    project = await _get_owned_project(db, project_id, current_user)
+    if project.rag_mode != RagMode.GRAPH:
+        raise HTTPException(status_code=400, detail="Graph export requires graph mode")
+    state = GraphIndexState.from_db(project.graph_index)
+    if state.status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail="Graph index is not ready for export",
+        )
+
+    storage = get_storage_service()
+    prefix = graphrag_storage_prefix(project_id)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name in PARQUET_FILES:
+            key = f"{prefix}/output/{name}"
+            if storage.file_exists(key):
+                zf.writestr(name, storage.download_file(key))
+        for candidate in GRAPHML_CANDIDATES:
+            key = f"{prefix}/output/{candidate}"
+            if storage.file_exists(key):
+                zf.writestr(Path(candidate).name, storage.download_file(key))
+                break
+        else:
+            for key in storage.list_files(f"{prefix}/output/"):
+                if key.endswith(".graphml"):
+                    rel = key.split("/output/", 1)[-1]
+                    zf.writestr(Path(rel).name, storage.download_file(key))
+                    break
+
+    buffer.seek(0)
+    filename = f"graph-export-{project_id}.zip"
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.patch("/{project_id}/rag-mode", response_model=RagModeSwitchResponse)
+async def switch_rag_mode(
+    project_id: UUID,
+    body: RagModeSwitchRequest,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RagModeSwitchResponse:
+    project = await _get_owned_project(db, project_id, current_user)
+    new_mode = RagMode(body.rag_mode)
+    old_mode = project.rag_mode
+    if new_mode == old_mode:
+        return RagModeSwitchResponse(
+            rag_mode=new_mode.value,
+            message="Project is already in the requested mode",
+            documents_queued=0,
+        )
+
+    wipe_index_for_mode(project_id, from_mode=old_mode.value)
+    project.rag_mode = new_mode
+    project.rag_config = RagConfig.for_mode(new_mode).to_db()
+    project.graph_index = GraphIndexState(status="pending").to_db()
+    await db.commit()
+
+    docs_result = await db.execute(
+        select(Document).where(Document.project_id == project_id)
+    )
+    documents = docs_result.scalars().all()
+    for doc in documents:
+        schedule_process_document(
+            doc.id,
+            project_id,
+            force_full_extract=False,
+            mode=ReindexMode.AUTO,
+        )
+
+    return RagModeSwitchResponse(
+        rag_mode=new_mode.value,
+        message=(
+            f"Switched from {old_mode.value} to {new_mode.value}. "
+            "Previous index data was removed; documents are reprocessing."
+        ),
+        documents_queued=len(documents),
+    )

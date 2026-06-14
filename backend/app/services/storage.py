@@ -121,6 +121,65 @@ class StorageService:
             logger.error(f"Failed to delete file: {e}")
             raise
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all objects under a prefix. Returns count deleted."""
+        deleted = 0
+        try:
+            objects = self._client.list_objects(
+                self._bucket,
+                prefix=prefix,
+                recursive=True,
+            )
+            for obj in objects:
+                self._client.remove_object(self._bucket, obj.object_name)
+                deleted += 1
+            if deleted:
+                logger.info("Deleted %s objects under prefix: %s", deleted, prefix)
+            return deleted
+        except S3Error as e:
+            logger.error(f"Failed to delete prefix {prefix}: {e}")
+            raise
+
+    def upload_directory(self, local_dir: str, prefix: str) -> None:
+        """Upload all files from a local directory to storage under prefix."""
+        from pathlib import Path
+
+        root = Path(local_dir)
+        for path in root.rglob("*"):
+            if path.is_file():
+                rel = path.relative_to(root).as_posix()
+                key = f"{prefix.rstrip('/')}/{rel}"
+                data = path.read_bytes()
+                content_type = "application/octet-stream"
+                if path.suffix == ".yaml":
+                    content_type = "application/x-yaml"
+                elif path.suffix == ".parquet":
+                    content_type = "application/vnd.apache.parquet"
+                elif path.suffix == ".graphml":
+                    content_type = "application/graphml+xml"
+                elif path.suffix in {".md", ".txt", ".csv"}:
+                    content_type = "text/plain; charset=utf-8"
+                self.upload_file(key, data, content_type=content_type)
+
+    def download_prefix(self, prefix: str, local_dir: str) -> int:
+        """Download all objects under prefix into local_dir. Returns file count."""
+        from pathlib import Path
+
+        root = Path(local_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for key in self.list_files(prefix):
+            if not key.startswith(prefix):
+                continue
+            rel = key[len(prefix) :].lstrip("/")
+            if not rel:
+                continue
+            dest = root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(self.download_file(key))
+            count += 1
+        return count
+
     def file_exists(self, path: str) -> bool:
         """Check if a file exists."""
         try:

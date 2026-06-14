@@ -1,0 +1,80 @@
+"""Tests for graph export zip endpoint."""
+
+import io
+import zipfile
+from unittest.mock import MagicMock
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import Project, RagMode
+from app.schemas.graph_index import GraphIndexState
+
+
+async def _login(client: AsyncClient, email: str) -> str:
+    await client.post(
+        "/api/auth/register",
+        json={"email": email, "name": "Export User", "password": "password123"},
+    )
+    resp = await client.post(
+        "/api/auth/login",
+        data={"username": email, "password": "password123"},
+    )
+    return resp.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_graph_export_requires_ready_index(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    token = await _login(async_client, "export@example.com")
+    create = await async_client.post(
+        "/api/projects",
+        json={"name": "Graph Project", "rag_mode": "graph"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    project_id = create.json()["id"]
+    response = await async_client.get(
+        f"/api/projects/{project_id}/graph-export",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_graph_export_zip_contents(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    token = await _login(async_client, "export2@example.com")
+    create = await async_client.post(
+        "/api/projects",
+        json={"name": "Graph Ready", "rag_mode": "graph"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    project_id = create.json()["id"]
+
+    from uuid import UUID
+
+    project = await db_session.get(Project, UUID(project_id))
+    assert project is not None
+    project.graph_index = GraphIndexState(status="ready", document_count=1).to_db()
+    await db_session.commit()
+
+    storage = MagicMock()
+    storage.file_exists.side_effect = lambda key: key.endswith("entities.parquet")
+    storage.download_file.return_value = b"parquet-bytes"
+    storage.list_files.return_value = []
+    monkeypatch.setattr("app.api.projects.get_storage_service", lambda: storage)
+
+    response = await async_client.get(
+        f"/api/projects/{project_id}/graph-export",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(response.content))
+    assert "entities.parquet" in zf.namelist()

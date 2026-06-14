@@ -11,6 +11,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import Settings, settings
+from app.db.models import RagMode
+
+VectorRetrievalStrategy = Literal["dense", "parent_child", "hybrid", "bm25"]
+GraphRetrievalStrategy = Literal["graph_local", "graph_global"]
+RetrievalStrategy = VectorRetrievalStrategy | GraphRetrievalStrategy
 
 
 class ExtractionConfig(BaseModel):
@@ -70,11 +75,42 @@ class Bm25RetrievalParams(BaseModel):
     b: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
-class RetrievalConfig(BaseModel):
-    strategy: Literal["dense", "parent_child", "hybrid", "bm25"] = "dense"
+class GraphIndexingConfig(BaseModel):
+    enabled: bool = True
+    method: Literal["standard", "nlp"] = "standard"
+    community_level: int = Field(default=2, ge=0, le=4)
+
+
+class GraphLocalRetrievalParams(BaseModel):
+    community_level: int = Field(default=2, ge=0, le=4)
+    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
+
+
+class GraphGlobalRetrievalParams(BaseModel):
+    community_level: int = Field(default=2, ge=0, le=4)
+    dynamic_community_selection: bool = False
+    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
+
+
+class GraphRetrievalConfig(BaseModel):
+    strategy: GraphRetrievalStrategy = "graph_local"
     params: dict[str, Any] = Field(default_factory=dict)
 
     def resolved_params(self) -> BaseModel:
+        if self.strategy == "graph_global":
+            return GraphGlobalRetrievalParams.model_validate(self.params)
+        return GraphLocalRetrievalParams.model_validate(self.params)
+
+
+class RetrievalConfig(BaseModel):
+    strategy: RetrievalStrategy = "dense"
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    def resolved_params(self) -> BaseModel:
+        if self.strategy == "graph_global":
+            return GraphGlobalRetrievalParams.model_validate(self.params)
+        if self.strategy == "graph_local":
+            return GraphLocalRetrievalParams.model_validate(self.params)
         if self.strategy == "hybrid":
             return HybridRetrievalParams.model_validate(self.params)
         if self.strategy == "bm25":
@@ -94,6 +130,32 @@ class RagConfig(BaseModel):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
+    graph_indexing: GraphIndexingConfig = Field(default_factory=GraphIndexingConfig)
+    graph_retrieval: GraphRetrievalConfig = Field(default_factory=GraphRetrievalConfig)
+
+    @classmethod
+    def for_mode(cls, mode: RagMode, s: Settings | None = None) -> RagConfig:
+        s = s or settings
+        if mode == RagMode.GRAPH:
+            return cls(
+                extraction=ExtractionConfig(strategy=s.extraction_strategy),
+                chunking=ChunkingConfig(strategy="fixed_window", params={}),
+                retrieval=RetrievalConfig(
+                    strategy="graph_local",
+                    params={"community_level": s.graphrag_community_level},
+                ),
+                reranking=RerankingConfig(strategy="none", params={}),
+                graph_indexing=GraphIndexingConfig(
+                    enabled=True,
+                    method="standard",
+                    community_level=s.graphrag_community_level,
+                ),
+                graph_retrieval=GraphRetrievalConfig(
+                    strategy="graph_local",
+                    params={"community_level": s.graphrag_community_level},
+                ),
+            )
+        return cls.from_settings(s)
 
     @classmethod
     def from_settings(cls, s: Settings | None = None) -> RagConfig:
@@ -131,6 +193,19 @@ class RagConfig(BaseModel):
         }
         return _stable_hash(payload)
 
+    def graph_indexing_fingerprint(self) -> str:
+        payload = {
+            "graph_indexing": self.graph_indexing.model_dump(mode="json"),
+            "extraction": self.extraction.model_dump(mode="json"),
+        }
+        return _stable_hash(payload)
+
+    def is_graph_retrieval(self) -> bool:
+        return self.retrieval.strategy in ("graph_local", "graph_global")
+
+    def is_vector_retrieval(self) -> bool:
+        return not self.is_graph_retrieval()
+
 
 def extraction_fingerprint(extraction: ExtractionConfig) -> str:
     return _stable_hash(extraction.model_dump(mode="json"))
@@ -142,9 +217,7 @@ def _stable_hash(payload: dict[str, Any]) -> str:
 
 
 class RetrievalOverrides(BaseModel):
-    retrieval_strategy: Literal["dense", "parent_child", "hybrid", "bm25"] | None = (
-        None
-    )
+    retrieval_strategy: RetrievalStrategy | None = None
     reranking_strategy: Literal["none", "cross_encoder"] | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)
     retrieval_params: dict[str, Any] = Field(default_factory=dict)

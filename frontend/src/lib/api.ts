@@ -1,5 +1,5 @@
 import axios, { type AxiosError, type AxiosInstance } from 'axios';
-import type { DocumentStatus, RagConfig, RetrievalOverrides } from './rag-types';
+import type { DocumentStatus, GraphIndexState, RagConfig, RagMode, RetrievalOverrides } from './rag-types';
 
 const API_BASE_URL = '/api';
 
@@ -115,7 +115,9 @@ export interface Project {
   name: string;
   description: string | null;
   owner_id: string;
+  rag_mode: RagMode;
   rag_config: RagConfig;
+  graph_index: GraphIndexState;
   document_count?: number;
   created_at: string;
   updated_at: string;
@@ -129,6 +131,7 @@ export interface ProjectListResponse {
 export interface CreateProject {
   name: string;
   description?: string;
+  rag_mode?: RagMode;
   rag_config?: RagConfig;
 }
 
@@ -167,6 +170,34 @@ export const projectsApi = {
     const { data } = await api.post<{ processed: number; message: string }>(
       `/projects/${id}/reindex`,
       { mode }
+    );
+    return data;
+  },
+
+  getGraphIndexStatus: async (id: string): Promise<GraphIndexState> => {
+    const { data } = await api.get<GraphIndexState>(`/projects/${id}/graph-index/status`);
+    return data;
+  },
+
+  rebuildGraphIndex: async (id: string): Promise<GraphIndexState> => {
+    const { data } = await api.post<GraphIndexState>(`/projects/${id}/graph-index/rebuild`);
+    return data;
+  },
+
+  downloadGraphExport: async (id: string): Promise<Blob> => {
+    const { data } = await api.get<Blob>(`/projects/${id}/graph-export`, {
+      responseType: 'blob',
+    });
+    return data;
+  },
+
+  switchRagMode: async (
+    id: string,
+    rag_mode: RagMode
+  ): Promise<{ rag_mode: RagMode; message: string; documents_queued: number }> => {
+    const { data } = await api.patch<{ rag_mode: RagMode; message: string; documents_queued: number }>(
+      `/projects/${id}/rag-mode`,
+      { rag_mode }
     );
     return data;
   },
@@ -252,16 +283,22 @@ export interface RetrievalQueryResponse {
 }
 
 export const ragApi = {
-  getOptions: async (): Promise<{
+  getOptions: async (
+    rag_mode?: RagMode
+  ): Promise<{
+    rag_mode: RagMode;
     defaults: RagConfig;
     extraction_strategies: string[];
     chunking_strategies: string[];
     retrieval_strategies: string[];
     reranking_strategies: string[];
+    graph_indexing?: Record<string, unknown>;
     chunking_params: Record<string, Record<string, number | null>>;
     retrieval_params: Record<string, Record<string, unknown>>;
   }> => {
-    const { data } = await api.get('/rag/options');
+    const { data } = await api.get('/rag/options', {
+      params: rag_mode ? { rag_mode } : undefined,
+    });
     return data;
   },
 };

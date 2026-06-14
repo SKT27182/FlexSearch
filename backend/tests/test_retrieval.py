@@ -115,6 +115,55 @@ class TestRetrievalQuery:
         )
         assert response.status_code == 403
 
+    async def test_query_graph_index_not_ready(
+        self, async_client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        token = await create_user_and_login(async_client, "graph409@example.com")
+        project_response = await async_client.post(
+            "/api/projects",
+            json={"name": "Graph Project", "rag_mode": "graph"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        project_id = project_response.json()["id"]
+
+        response = await async_client.post(
+            "/api/retrieval/query",
+            json={"project_id": project_id, "query": "themes", "top_k": 3},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 409
+
+    async def test_query_strategy_mismatch_on_graph_project(
+        self, async_client: AsyncClient, db_session: AsyncSession, monkeypatch
+    ) -> None:
+        from uuid import UUID
+
+        from app.db.models import Project
+        from app.schemas.graph_index import GraphIndexState
+
+        token = await create_user_and_login(async_client, "mismatch@example.com")
+        project_response = await async_client.post(
+            "/api/projects",
+            json={"name": "Graph Ready", "rag_mode": "graph"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        project_id = project_response.json()["id"]
+        project = await db_session.get(Project, UUID(project_id))
+        assert project is not None
+        project.graph_index = GraphIndexState(status="ready").to_db()
+        await db_session.commit()
+
+        response = await async_client.post(
+            "/api/retrieval/query",
+            json={
+                "project_id": project_id,
+                "query": "test",
+                "overrides": {"retrieval_strategy": "dense"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 400
+
     async def test_query_missing_project(
         self, async_client: AsyncClient, db_session: AsyncSession
     ) -> None:

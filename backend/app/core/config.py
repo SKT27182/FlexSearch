@@ -177,6 +177,20 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
+    # GRAPH RAG (Microsoft GraphRAG)
+    # =========================================================================
+    graph_indexing_enabled: bool = Field(
+        default=True,
+        description="Global kill switch for GraphRAG indexing jobs",
+    )
+    graphrag_community_level: int = Field(
+        default=2,
+        ge=0,
+        le=4,
+        description="Default GraphRAG community level for indexing and search",
+    )
+
+    # =========================================================================
     # REDIS (document status pub/sub + SSE; align with infra-hub backend/.env)
     # =========================================================================
     redis_host: str = Field(

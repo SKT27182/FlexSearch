@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { RagConfigForm, defaultRagConfig } from '@/components/RagConfigForm';
-import type { RagConfig } from '@/lib/rag-types';
+import { RagConfigForm, defaultRagConfigForMode } from '@/components/RagConfigForm';
+import type { RagConfig, RagMode } from '@/lib/rag-types';
 import { Link } from 'react-router-dom';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
@@ -13,7 +13,13 @@ export function ProjectsPage() {
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [creating, setCreating] = useState(false);
-  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultRagConfig());
+  const [ragMode, setRagMode] = useState<RagMode>('vector');
+  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultRagConfigForMode('vector'));
+
+  const handleRagModeChange = (mode: RagMode) => {
+    setRagMode(mode);
+    setRagConfig(defaultRagConfigForMode(mode));
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,9 +27,11 @@ export function ProjectsPage() {
 
     setCreating(true);
     try {
-      await createProject(newName.trim(), newDescription.trim() || undefined, ragConfig);
+      await createProject(newName.trim(), newDescription.trim() || undefined, ragConfig, ragMode);
       setNewName('');
       setNewDescription('');
+      setRagMode('vector');
+      setRagConfig(defaultRagConfigForMode('vector'));
       setShowCreate(false);
     } finally {
       setCreating(false);
@@ -82,7 +90,23 @@ export function ProjectsPage() {
                   onChange={(e) => setNewDescription(e.target.value)}
                 />
               </div>
-              <RagConfigForm value={ragConfig} onChange={setRagConfig} compact />
+              <div className="space-y-2">
+                <label className="text-sm font-medium">RAG mode</label>
+                <select
+                  className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  value={ragMode}
+                  onChange={(e) => handleRagModeChange(e.target.value as RagMode)}
+                >
+                  <option value="vector">Traditional RAG (Qdrant vectors)</option>
+                  <option value="graph">Graph RAG (Microsoft GraphRAG)</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  {ragMode === 'graph'
+                    ? 'Builds a knowledge graph with community reports. Indexing uses your LLM and may be costly.'
+                    : 'Classic chunk + embed + vector search via Qdrant.'}
+                </p>
+              </div>
+              <RagConfigForm value={ragConfig} onChange={setRagConfig} compact ragMode={ragMode} />
             </CardContent>
             <CardFooter className="flex gap-3">
               <Button type="submit" isLoading={creating}>
@@ -126,7 +150,8 @@ export function ProjectsPage() {
                     <div>
                       <CardTitle className="text-lg">{project.name}</CardTitle>
                       <CardDescription className="text-xs">
-                        Created {formatRelativeTime(project.created_at)}
+                        Created {formatRelativeTime(project.created_at)} ·{' '}
+                        {project.rag_mode === 'graph' ? 'Graph RAG' : 'Vector RAG'}
                       </CardDescription>
                     </div>
                   </div>

@@ -27,6 +27,13 @@ class UserRole(str, enum.Enum):
     USER = "USER"
 
 
+class RagMode(str, enum.Enum):
+    """Project RAG backend: classical vector store or Microsoft GraphRAG."""
+
+    VECTOR = "vector"
+    GRAPH = "graph"
+
+
 class DocumentStatus(str, enum.Enum):
     """Document processing status pipeline."""
 
@@ -115,6 +122,16 @@ class Project(Base):
         index=True,
     )
     rag_config: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    rag_mode: Mapped[RagMode] = mapped_column(
+        Enum(RagMode, native_enum=False, length=16),
+        default=RagMode.VECTOR,
+        nullable=False,
+    )
+    graph_index: Mapped[dict[str, Any]] = mapped_column(
         JSON,
         nullable=False,
         default=dict,

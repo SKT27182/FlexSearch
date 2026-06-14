@@ -15,6 +15,8 @@ from app.rag.reranking import BaseRerankingStrategy, CrossEncoderReranking, NoRe
 from app.rag.retrieval import (
     BaseRetrievalStrategy,
     DenseRetrieval,
+    GraphGlobalRetrieval,
+    GraphLocalRetrieval,
     HybridRetrieval,
     ParentChildRetrieval,
     SparseRetrieval,
@@ -22,6 +24,8 @@ from app.rag.retrieval import (
 from app.schemas.rag_config import (
     ChunkingConfig,
     ExtractionConfig,
+    GraphGlobalRetrievalParams,
+    GraphLocalRetrievalParams,
     RagConfig,
     RerankingConfig,
     RetrievalConfig,
@@ -64,6 +68,15 @@ def build_chunking_strategy(config: ChunkingConfig) -> BaseChunkingStrategy:
 def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
     params = config.resolved_params()
     match config.strategy:
+        case "graph_local":
+            assert isinstance(params, GraphLocalRetrievalParams)
+            return GraphLocalRetrieval(community_level=params.community_level)
+        case "graph_global":
+            assert isinstance(params, GraphGlobalRetrievalParams)
+            return GraphGlobalRetrieval(
+                community_level=params.community_level,
+                dynamic_community_selection=params.dynamic_community_selection,
+            )
         case "parent_child":
             return ParentChildRetrieval()
         case "hybrid":

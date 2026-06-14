@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { projectsApi, type Project } from '@/lib/api';
-import type { RagConfig } from '@/lib/rag-types';
+import type { RagConfig, RagMode } from '@/lib/rag-types';
 
 interface ProjectState {
   projects: Project[];
@@ -13,7 +13,8 @@ interface ProjectState {
   createProject: (
     name: string,
     description?: string,
-    rag_config?: RagConfig
+    rag_config?: RagConfig,
+    rag_mode?: RagMode
   ) => Promise<Project>;
   deleteProject: (id: string) => Promise<void>;
   
@@ -40,8 +41,13 @@ export const useProjectStore = create<ProjectState>()((set) => ({
     set({ currentProject: project });
   },
 
-  createProject: async (name, description, rag_config) => {
-    const project = await projectsApi.create({ name, description, rag_config });
+  createProject: async (name, description, rag_config, rag_mode = 'vector') => {
+    const project = await projectsApi.create({
+      name,
+      description,
+      rag_config,
+      rag_mode,
+    });
     set((state) => ({ projects: [project, ...state.projects] }));
     return project;
   },

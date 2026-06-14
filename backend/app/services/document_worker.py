@@ -9,11 +9,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentStatus, Project
+from app.db.models import Document, DocumentStatus, Project, RagMode
 from app.db.postgres import async_session_maker
 from app.rag.pipeline import create_pipeline
 from app.schemas.rag_config import RagConfig, extraction_fingerprint
 from app.services.document_status import update_document_status
+from app.services.graph_index_tasks import schedule_graph_index_rebuild
 from app.services.document_storage import (
     build_extracted_meta,
     extracted_md_key,
@@ -62,6 +63,9 @@ async def process_document(
             return
 
         rag_config = await get_project_rag_config(db, project_id)
+        project_result = await db.execute(select(Project).where(Project.id == project_id))
+        project = project_result.scalar_one()
+        is_graph_project = project.rag_mode == RagMode.GRAPH
         pipeline = create_pipeline(rag_config)
         storage = get_storage_service()
         ext_hash = extraction_fingerprint(rag_config.extraction)
@@ -84,6 +88,10 @@ async def process_document(
                     can_skip_extract = True
 
             if can_skip_extract:
+                if is_graph_project:
+                    await _complete_graph_document(db, document)
+                    schedule_graph_index_rebuild(project_id)
+                    return
                 await _run_chunk_and_index(
                     db, document, pipeline, storage, rag_config, ext_hash
                 )
@@ -172,6 +180,11 @@ async def process_document(
                 extracted_at=datetime.now(timezone.utc),
             )
 
+            if is_graph_project:
+                await _complete_graph_document(db, document)
+                schedule_graph_index_rebuild(project_id)
+                return
+
             await _run_chunk_and_index(
                 db, document, pipeline, storage, rag_config, ext_hash, extracted.text, extracted.page_count
             )
@@ -186,6 +199,17 @@ async def process_document(
                 progress_pct=0,
                 error_message=str(exc),
             )
+
+
+async def _complete_graph_document(db: AsyncSession, document: Document) -> None:
+    await update_document_status(
+        db,
+        document,
+        status=DocumentStatus.COMPLETED,
+        processing_step="Text extracted — graph index will rebuild shortly",
+        progress_pct=100,
+        chunk_count=0,
+    )
 
 
 async def _run_chunk_and_index(

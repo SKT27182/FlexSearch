@@ -203,12 +203,56 @@ FlexSearch/
 | GET | `/api/projects/{project_id}/documents/{id}/content` | Extracted text preview |
 | POST | `/api/projects/{project_id}/documents/{id}/retry` | Re-run ingestion for stuck/failed document |
 | POST | `/api/retrieval/query` | Retrieve chunks (`top_k`, `overrides` optional) |
-| GET | `/api/rag/options` | Allowed RAG strategy values |
+| GET | `/api/rag/options` | Allowed RAG strategy values (optional `?rag_mode=vector\|graph`) |
+| PATCH | `/api/projects/{id}/rag-mode` | Destructive switch between vector and graph RAG |
+| GET | `/api/projects/{id}/graph-index/status` | Graph index status (graph projects) |
+| POST | `/api/projects/{id}/graph-index/rebuild` | Trigger graph reindex |
+| GET | `/api/projects/{id}/graph-export` | Download parquet + GraphML zip for visualization |
 | GET | `/api/admin/stats` | System statistics (admin) |
+
+## Graph RAG (Microsoft GraphRAG)
+
+FlexSearch supports two **exclusive** project modes at creation time:
+
+| Mode | Index | Retrieval strategies |
+|------|-------|---------------------|
+| **vector** (default) | Qdrant chunk embeddings | `dense`, `bm25`, `hybrid`, `parent_child` |
+| **graph** | Microsoft GraphRAG (Parquet + LanceDB in MinIO) | `graph_local`, `graph_global` |
+
+### Worktree development
+
+Implement Graph RAG work on branch `feature/graph_rag` in a **separate git worktree** — do not switch branches in your main FlexSearch checkout:
+
+```bash
+cd /path/to/FlexSearch   # main repo — any branch is fine
+git worktree add ../FlexSearch-feature-graph-rag feature/graph_rag
+cd ../FlexSearch-feature-graph-rag
+```
+
+### Graph storage
+
+- **Structure**: GraphRAG parquet tables (`entities`, `relationships`, `communities`, …) and optional **GraphML** snapshot under `projects/{id}/graphrag/` in MinIO
+- **Embeddings**: LanceDB inside the GraphRAG workspace (synced to MinIO with `output/`)
+- **Qdrant**: not used for pure graph projects
+
+### LLM requirements
+
+Graph indexing and graph search use the same `MODEL_NAME` and `API_KEY` as VLM extraction. Set `GRAPH_INDEXING_ENABLED=false` in dev to skip graph builds globally.
+
+### Visualization
+
+When the graph index is **ready**, download **Graph export** from the project page and open in:
+
+- [GraphRAG Visualizer](https://noworneverev.github.io/graphrag-visualizer/) (upload parquet)
+- [Gephi](https://gephi.org) via GraphML (see [GraphRAG visualization guide](https://microsoft.github.io/graphrag/guides/visualization))
+
+### Mode switch
+
+`PATCH /api/projects/{id}/rag-mode` wipes the old index (Qdrant or graph workspace) and requeues all documents.
 
 ## Tech Stack
 
-**Backend**: FastAPI, SQLAlchemy, Alembic, Qdrant, MinIO, Redis (pub/sub), LiteLLM  
+**Backend**: FastAPI, SQLAlchemy, Alembic, Qdrant, MinIO, Redis (pub/sub), LiteLLM, Microsoft GraphRAG  
 **Frontend**: React, TypeScript, Tailwind CSS, Zustand, Vite, `@microsoft/fetch-event-source`  
 **Infrastructure**: PostgreSQL, Qdrant, MinIO, Redis
 
