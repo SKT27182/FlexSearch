@@ -5,10 +5,6 @@ from __future__ import annotations
 from typing import Literal
 
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
-from app.rag.retrieval.graph_global_microsoft import (
-    MicrosoftGraphGlobalRetrieval,
-    build_microsoft_graph_global,
-)
 from app.rag.retrieval.graph_global_neo4j import Neo4jGraphGlobalRetrieval
 from app.schemas.rag_config import (
     GraphRetrievalConfig,
@@ -34,6 +30,10 @@ class GraphGlobalRetrieval(BaseRetrievalStrategy):
                 neo4j_config or GraphRetrievalConfig(strategy="graph_global")
             )
         else:
+            from app.rag.retrieval.graph_global_microsoft import (
+                build_microsoft_graph_global,
+            )
+
             params = microsoft_params or MicrosoftGraphGlobalRetrievalParams()
             self._delegate = build_microsoft_graph_global(params)
 
@@ -53,7 +53,7 @@ class GraphGlobalRetrieval(BaseRetrievalStrategy):
 def build_graph_global(
     *,
     graph_backend: GraphBackend = "microsoft",
-    microsoft_params: GraphGlobalRetrievalParams | None = None,
+    microsoft_params: MicrosoftGraphGlobalRetrievalParams | None = None,
     neo4j_config: GraphRetrievalConfig | None = None,
 ) -> GraphGlobalRetrieval:
     return GraphGlobalRetrieval(

@@ -11,10 +11,6 @@ from typing import Any
 from uuid import UUID
 
 import pandas as pd
-from graphrag.api import build_index, global_search, local_search
-from graphrag.config.enums import IndexingMethod
-from graphrag.config.load_config import load_config
-from graphrag.config.models.graph_rag_config import GraphRagConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +18,7 @@ from app.core.config import settings
 from app.db.models import Document, DocumentStatus, Project, RagMode
 from app.db.postgres import async_session_maker
 from app.schemas.graph_index import GraphIndexState
-from app.schemas.rag_config import GraphRagConfig
+from app.schemas.rag_config import GraphRagConfig as AppGraphRagConfig
 from app.services.document_storage import extracted_md_key
 from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
@@ -105,7 +101,9 @@ class GraphRAGWorkspace:
         settings_path = root / "settings.yaml"
         settings_path.write_text(_settings_yaml_template(), encoding="utf-8")
 
-    def load_config(self, root: Path) -> GraphRagConfig:
+    def load_config(self, root: Path) -> Any:
+        from graphrag.config.load_config import load_config
+
         os.environ.setdefault("GRAPHRAG_API_KEY", settings.api_key or "")
         return load_config(root)
 
@@ -173,7 +171,7 @@ class GraphRAGWorkspace:
             project = await _get_project(db, project_id)
             if project.rag_mode != RagMode.GRAPH:
                 return
-            rag_config = GraphRagConfig.from_db(project.rag_config)
+            rag_config = AppGraphRagConfig.from_db(project.rag_config)
             if rag_config.graph_backend != "microsoft":
                 return
             if not rag_config.microsoft_indexing.enabled:
@@ -205,6 +203,9 @@ class GraphRAGWorkspace:
 
         root = self.materialize(project_id)
         try:
+            from graphrag.api import build_index
+            from graphrag.config.enums import IndexingMethod
+
             df = pd.DataFrame(docs)
             config = self.load_config(root)
             method = (
@@ -269,6 +270,8 @@ class GraphRAGWorkspace:
     ) -> list[Any]:
         root = self.materialize(project_id)
         try:
+            from graphrag.api import local_search
+
             config = self.load_config(root)
             tables = self.load_parquet_tables(root)
             required = (
@@ -310,6 +313,8 @@ class GraphRAGWorkspace:
     ) -> list[Any]:
         root = self.materialize(project_id)
         try:
+            from graphrag.api import global_search
+
             config = self.load_config(root)
             tables = self.load_parquet_tables(root)
             required = ("entities", "communities", "community_reports")

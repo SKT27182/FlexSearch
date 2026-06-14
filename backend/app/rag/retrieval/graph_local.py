@@ -5,13 +5,8 @@ from __future__ import annotations
 from typing import Literal
 
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
-from app.rag.retrieval.graph_local_microsoft import (
-    MicrosoftGraphLocalRetrieval,
-    build_microsoft_graph_local,
-)
 from app.rag.retrieval.graph_local_neo4j import Neo4jGraphLocalRetrieval
 from app.schemas.rag_config import (
-    GraphLocalRetrievalParams,
     GraphRetrievalConfig,
     MicrosoftGraphLocalRetrievalParams,
 )
@@ -35,6 +30,10 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
                 neo4j_config or GraphRetrievalConfig(strategy="graph_local")
             )
         else:
+            from app.rag.retrieval.graph_local_microsoft import (
+                build_microsoft_graph_local,
+            )
+
             params = microsoft_params or MicrosoftGraphLocalRetrievalParams()
             self._delegate = build_microsoft_graph_local(params)
 

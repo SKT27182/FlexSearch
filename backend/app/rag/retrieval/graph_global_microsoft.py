@@ -5,7 +5,6 @@ from __future__ import annotations
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.rag.retrieval.graph_context_mapper import context_to_retrieval_results
 from app.schemas.rag_config import MicrosoftGraphGlobalRetrievalParams
-from app.services.graphrag_workspace import get_graphrag_workspace
 
 
 class MicrosoftGraphGlobalRetrieval(BaseRetrievalStrategy):
@@ -30,6 +29,8 @@ class MicrosoftGraphGlobalRetrieval(BaseRetrievalStrategy):
         project_id: str,
         top_k: int = 5,
     ) -> list[RetrievalResult]:
+        from app.services.graphrag_workspace import get_graphrag_workspace
+
         workspace = get_graphrag_workspace()
         context = await workspace.run_global_search(
             project_id,
