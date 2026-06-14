@@ -1,18 +1,38 @@
-"""GraphRAG local search retrieval strategy."""
+"""Graph-local retrieval dispatching to Neo4j or Microsoft GraphRAG backends."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
-from app.rag.retrieval.graph_context_mapper import context_to_retrieval_results
-from app.schemas.rag_config import GraphLocalRetrievalParams
-from app.services.graphrag_workspace import get_graphrag_workspace
+from app.rag.retrieval.graph_local_microsoft import (
+    MicrosoftGraphLocalRetrieval,
+    build_microsoft_graph_local,
+)
+from app.rag.retrieval.graph_local_neo4j import Neo4jGraphLocalRetrieval
+from app.schemas.rag_config import GraphLocalRetrievalParams, GraphRetrievalConfig
+
+GraphBackend = Literal["neo4j", "microsoft"]
 
 
 class GraphLocalRetrieval(BaseRetrievalStrategy):
-    """Entity-focused GraphRAG local search."""
+    """Dispatches graph_local retrieval to the configured graph backend."""
 
-    def __init__(self, *, community_level: int = 2) -> None:
-        self._community_level = community_level
+    def __init__(
+        self,
+        *,
+        graph_backend: GraphBackend,
+        microsoft_params: GraphLocalRetrievalParams | None = None,
+        neo4j_config: GraphRetrievalConfig | None = None,
+    ) -> None:
+        self._graph_backend = graph_backend
+        if graph_backend == "neo4j":
+            self._delegate: BaseRetrievalStrategy = Neo4jGraphLocalRetrieval(
+                neo4j_config or GraphRetrievalConfig(strategy="graph_local")
+            )
+        else:
+            params = microsoft_params or GraphLocalRetrievalParams()
+            self._delegate = build_microsoft_graph_local(params)
 
     @property
     def name(self) -> str:
@@ -24,15 +44,17 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
         project_id: str,
         top_k: int = 5,
     ) -> list[RetrievalResult]:
-        workspace = get_graphrag_workspace()
-        context = await workspace.run_local_search(
-            project_id,
-            query,
-            community_level=self._community_level,
-            top_k=top_k,
-        )
-        return context_to_retrieval_results(context, top_k=top_k)
+        return await self._delegate.retrieve(query, project_id, top_k=top_k)
 
 
-def build_graph_local(params: GraphLocalRetrievalParams) -> GraphLocalRetrieval:
-    return GraphLocalRetrieval(community_level=params.community_level)
+def build_graph_local(
+    *,
+    graph_backend: GraphBackend = "microsoft",
+    microsoft_params: GraphLocalRetrievalParams | None = None,
+    neo4j_config: GraphRetrievalConfig | None = None,
+) -> GraphLocalRetrieval:
+    return GraphLocalRetrieval(
+        graph_backend=graph_backend,
+        microsoft_params=microsoft_params,
+        neo4j_config=neo4j_config,
+    )

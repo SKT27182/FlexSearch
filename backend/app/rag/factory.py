@@ -70,12 +70,15 @@ def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
     match config.strategy:
         case "graph_local":
             assert isinstance(params, GraphLocalRetrievalParams)
-            return GraphLocalRetrieval(community_level=params.community_level)
+            return GraphLocalRetrieval(
+                graph_backend="microsoft",
+                microsoft_params=params,
+            )
         case "graph_global":
             assert isinstance(params, GraphGlobalRetrievalParams)
             return GraphGlobalRetrieval(
-                community_level=params.community_level,
-                dynamic_community_selection=params.dynamic_community_selection,
+                graph_backend="microsoft",
+                microsoft_params=params,
             )
         case "parent_child":
             return ParentChildRetrieval()
