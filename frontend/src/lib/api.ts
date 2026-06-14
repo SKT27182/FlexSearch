@@ -117,7 +117,7 @@ export interface Project {
   owner_id: string;
   rag_mode: RagMode;
   rag_config: RagConfig;
-  graph_index: GraphIndexState;
+  graph_index_status: GraphIndexState | null;
   document_count?: number;
   created_at: string;
   updated_at: string;

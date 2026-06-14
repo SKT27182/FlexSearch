@@ -3,23 +3,32 @@
 from __future__ import annotations
 
 from app.db.models import RagMode
-from app.schemas.rag_config import EffectiveRagConfig, RagConfig, RetrievalOverrides
+from app.schemas.rag_config import (
+    GraphEffectiveRagConfig,
+    GraphRagConfig,
+    RetrievalOverrides,
+    VectorRagConfig,
+    EffectiveRagConfig,
+)
 
 VECTOR_STRATEGIES = frozenset({"dense", "bm25", "hybrid", "parent_child"})
 GRAPH_STRATEGIES = frozenset({"graph_local", "graph_global"})
 
 
 def effective_retrieval_strategy(
-    rag_config: RagConfig,
+    rag_config: VectorRagConfig | GraphRagConfig,
     overrides: RetrievalOverrides | None,
 ) -> str:
-    effective = EffectiveRagConfig.for_retrieval(rag_config, overrides)
+    if isinstance(rag_config, GraphRagConfig):
+        effective = GraphEffectiveRagConfig.for_retrieval(rag_config, overrides)
+    else:
+        effective = EffectiveRagConfig.for_retrieval(rag_config, overrides)
     return effective.retrieval.strategy
 
 
 def validate_retrieval_for_mode(
     rag_mode: RagMode,
-    rag_config: RagConfig,
+    rag_config: VectorRagConfig | GraphRagConfig,
     overrides: RetrievalOverrides | None,
 ) -> str | None:
     """Return error message if strategy mismatches mode, else None."""

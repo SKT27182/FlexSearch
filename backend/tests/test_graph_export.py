@@ -62,7 +62,9 @@ async def test_graph_export_zip_contents(
 
     project = await db_session.get(Project, UUID(project_id))
     assert project is not None
-    project.graph_index = GraphIndexState(status="ready", document_count=1).to_db()
+    project.graph_index_status = GraphIndexState(
+        backend="microsoft", status="ready", document_count=1
+    ).to_db()
     await db_session.commit()
 
     storage = MagicMock()

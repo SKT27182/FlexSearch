@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Document, DocumentStatus, Project, RagMode, User
-from app.schemas.graph_index import GraphIndexState, GraphIndexStatusResponse
+from app.schemas.graph_index import (
+    GraphIndexState,
+    GraphIndexStatusResponse,
+    default_graph_index_status,
+)
 from app.schemas.project import (
     ProjectCreate,
     ProjectListResponse,
@@ -29,8 +33,15 @@ from app.schemas.project import (
     ReindexRequest,
     ReindexResponse,
     project_to_response,
+    resolve_create_rag_config,
+    graph_backend_for_project,
 )
-from app.schemas.rag_config import RagConfig
+from app.schemas.rag_config import (
+    GraphRagConfig,
+    default_rag_config_for_mode,
+    parse_rag_config,
+)
+from app.rag.pipeline import create_pipeline
 from app.services.document_tasks import schedule_process_document
 from app.services.document_worker import ReindexMode
 from app.services.graph_index_tasks import schedule_graph_index_rebuild
@@ -79,19 +90,24 @@ async def create_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectResponse:
-    rag_mode = RagMode(project_data.rag_mode)
-    rag = (
-        project_data.rag_config.to_db()
-        if project_data.rag_config
-        else RagConfig.for_mode(rag_mode).to_db()
-    )
+    rag_mode = project_data.rag_mode
+    rag = resolve_create_rag_config(rag_mode, project_data.rag_config)
+    graph_backend = "neo4j"
+    if rag_mode == RagMode.GRAPH:
+        cfg = project_data.rag_config or default_rag_config_for_mode(RagMode.GRAPH)
+        if isinstance(cfg, GraphRagConfig):
+            graph_backend = cfg.graph_backend
     project = Project(
         name=project_data.name,
         description=project_data.description,
         owner_id=current_user.id,
         rag_mode=rag_mode,
         rag_config=rag,
-        graph_index=GraphIndexState().to_db(),
+        graph_index_status=(
+            default_graph_index_status(backend=graph_backend)
+            if rag_mode == RagMode.GRAPH
+            else None
+        ),
     )
     db.add(project)
     await db.commit()
@@ -160,7 +176,11 @@ async def update_project(
     if project_data.description is not None:
         project.description = project_data.description
     if project_data.rag_config is not None:
-        project.rag_config = project_data.rag_config.to_db()
+        rag_mode = project.rag_mode
+        if isinstance(rag_mode, str):
+            rag_mode = RagMode(rag_mode)
+        parsed = parse_rag_config(rag_mode, project_data.rag_config.to_db())
+        project.rag_config = parsed.to_db()
 
     await db.commit()
     await db.refresh(project)
@@ -219,6 +239,18 @@ async def delete_project(
         raise HTTPException(status_code=404, detail="Project not found")
     if not user_owns_project(current_user, project):
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    rag_mode = project.rag_mode
+    if isinstance(rag_mode, str):
+        rag_mode = RagMode(rag_mode)
+    rag_config = parse_rag_config(rag_mode, project.rag_config)
+    try:
+        create_pipeline(rag_config, rag_mode=rag_mode).delete_project_data(
+            str(project.id)
+        )
+    except Exception as exc:
+        logger.error("Failed to delete project RAG data: %s", exc)
+
     await db.delete(project)
     await db.commit()
 
@@ -235,13 +267,16 @@ async def get_graph_index_status(
             status_code=400,
             detail="Graph index status is only available for graph projects",
         )
-    state = GraphIndexState.from_db(project.graph_index)
+    state = GraphIndexState.from_db(project.graph_index_status)
     return GraphIndexStatusResponse(
+        backend=state.backend,
         status=state.status,
         indexed_at=state.indexed_at,
         fingerprint=state.fingerprint,
         error=state.error,
         document_count=state.document_count,
+        entity_count=state.entity_count,
+        passage_count=state.passage_count,
     )
 
 
@@ -254,16 +289,37 @@ async def rebuild_graph_index(
     project = await _get_owned_project(db, project_id, current_user)
     if project.rag_mode != RagMode.GRAPH:
         raise HTTPException(status_code=400, detail="Project is not in graph mode")
-    project.graph_index = GraphIndexState(status="indexing").to_db()
-    await db.commit()
-    schedule_graph_index_rebuild(project_id, debounce_seconds=0.0)
-    state = GraphIndexState.from_db(project.graph_index)
+    backend = graph_backend_for_project(project.rag_mode, project.rag_config)
+    if backend == "microsoft":
+        project.graph_index_status = GraphIndexState(
+            backend="microsoft", status="indexing"
+        ).to_db()
+        await db.commit()
+        schedule_graph_index_rebuild(project_id, debounce_seconds=0.0)
+    else:
+        project.graph_index_status = GraphIndexState(
+            backend="neo4j", status="indexing", entity_count=0, passage_count=0
+        ).to_db()
+        await db.commit()
+        docs_result = await db.execute(
+            select(Document).where(Document.project_id == project_id)
+        )
+        for doc in docs_result.scalars().all():
+            schedule_process_document(
+                doc.id,
+                project_id,
+                force_full_extract=False,
+                mode=ReindexMode.FROM_EXTRACTED,
+            )
+    state = GraphIndexState.from_db(project.graph_index_status)
     return GraphIndexStatusResponse(
         status="indexing" if state.status != "disabled" else state.status,
         indexed_at=state.indexed_at,
         fingerprint=state.fingerprint,
         error=state.error,
         document_count=state.document_count,
+        entity_count=state.entity_count,
+        passage_count=state.passage_count,
     )
 
 
@@ -276,7 +332,13 @@ async def export_graph(
     project = await _get_owned_project(db, project_id, current_user)
     if project.rag_mode != RagMode.GRAPH:
         raise HTTPException(status_code=400, detail="Graph export requires graph mode")
-    state = GraphIndexState.from_db(project.graph_index)
+    backend = graph_backend_for_project(project.rag_mode, project.rag_config)
+    if backend != "microsoft":
+        raise HTTPException(
+            status_code=400,
+            detail="Graph export is only available for Microsoft GraphRAG projects",
+        )
+    state = GraphIndexState.from_db(project.graph_index_status)
     if state.status != "ready":
         raise HTTPException(
             status_code=409,
@@ -329,10 +391,22 @@ async def switch_rag_mode(
             documents_queued=0,
         )
 
-    wipe_index_for_mode(project_id, from_mode=old_mode.value)
+    old_backend = graph_backend_for_project(old_mode, project.rag_config)
+    wipe_index_for_mode(
+        project_id,
+        from_mode=old_mode.value if isinstance(old_mode, RagMode) else str(old_mode),
+        graph_backend=old_backend,
+    )
     project.rag_mode = new_mode
-    project.rag_config = RagConfig.for_mode(new_mode).to_db()
-    project.graph_index = GraphIndexState(status="pending").to_db()
+    new_backend = body.graph_backend or "neo4j"
+    if new_mode == RagMode.GRAPH:
+        project.rag_config = default_rag_config_for_mode(
+            new_mode, graph_backend=new_backend
+        ).to_db()
+        project.graph_index_status = default_graph_index_status(backend=new_backend)
+    else:
+        project.rag_config = default_rag_config_for_mode(new_mode).to_db()
+        project.graph_index_status = None
     await db.commit()
 
     docs_result = await db.execute(

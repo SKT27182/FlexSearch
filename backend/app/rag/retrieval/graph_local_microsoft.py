@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.rag.retrieval.graph_context_mapper import context_to_retrieval_results
-from app.schemas.rag_config import GraphLocalRetrievalParams
+from app.schemas.rag_config import MicrosoftGraphLocalRetrievalParams
 from app.services.graphrag_workspace import get_graphrag_workspace
 
 
@@ -35,6 +35,6 @@ class MicrosoftGraphLocalRetrieval(BaseRetrievalStrategy):
 
 
 def build_microsoft_graph_local(
-    params: GraphLocalRetrievalParams,
+    params: MicrosoftGraphLocalRetrievalParams,
 ) -> MicrosoftGraphLocalRetrieval:
     return MicrosoftGraphLocalRetrieval(community_level=params.community_level)

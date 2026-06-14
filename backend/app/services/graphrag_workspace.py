@@ -22,7 +22,7 @@ from app.core.config import settings
 from app.db.models import Document, DocumentStatus, Project, RagMode
 from app.db.postgres import async_session_maker
 from app.schemas.graph_index import GraphIndexState
-from app.schemas.rag_config import RagConfig
+from app.schemas.rag_config import GraphRagConfig
 from app.services.document_storage import extracted_md_key
 from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
@@ -173,29 +173,33 @@ class GraphRAGWorkspace:
             project = await _get_project(db, project_id)
             if project.rag_mode != RagMode.GRAPH:
                 return
-            rag_config = RagConfig.from_db(project.rag_config)
-            if not rag_config.graph_indexing.enabled:
-                state = GraphIndexState(status="disabled")
-                project.graph_index = state.to_db()
+            rag_config = GraphRagConfig.from_db(project.rag_config)
+            if rag_config.graph_backend != "microsoft":
+                return
+            if not rag_config.microsoft_indexing.enabled:
+                state = GraphIndexState(backend="microsoft", status="disabled")
+                project.graph_index_status = state.to_db()
                 await db.commit()
                 return
 
             state = GraphIndexState(
+                backend="microsoft",
                 status="indexing",
                 fingerprint=rag_config.graph_indexing_fingerprint(),
                 error=None,
             )
-            project.graph_index = state.to_db()
+            project.graph_index_status = state.to_db()
             await db.commit()
 
             docs = await _load_extracted_documents(db, project_id)
             if not docs:
                 state = GraphIndexState(
+                    backend="microsoft",
                     status="pending",
                     fingerprint=rag_config.graph_indexing_fingerprint(),
                     document_count=0,
                 )
-                project.graph_index = state.to_db()
+                project.graph_index_status = state.to_db()
                 await db.commit()
                 return
 
@@ -205,7 +209,7 @@ class GraphRAGWorkspace:
             config = self.load_config(root)
             method = (
                 IndexingMethod.NLP
-                if rag_config.graph_indexing.method == "nlp"
+                if rag_config.microsoft_indexing.method == "nlp"
                 else IndexingMethod.Standard
             )
             results = await build_index(
@@ -227,7 +231,8 @@ class GraphRAGWorkspace:
 
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
-                project.graph_index = GraphIndexState(
+                project.graph_index_status = GraphIndexState(
+                    backend="microsoft",
                     status="ready",
                     indexed_at=datetime.now(timezone.utc),
                     fingerprint=rag_config.graph_indexing_fingerprint(),
@@ -240,8 +245,9 @@ class GraphRAGWorkspace:
             logger.exception("Graph index failed for project %s", project_id)
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
-                prev = GraphIndexState.from_db(project.graph_index)
-                project.graph_index = GraphIndexState(
+                prev = GraphIndexState.from_db(project.graph_index_status)
+                project.graph_index_status = GraphIndexState(
+                    backend="microsoft",
                     status="failed",
                     indexed_at=prev.indexed_at,
                     fingerprint=prev.fingerprint,

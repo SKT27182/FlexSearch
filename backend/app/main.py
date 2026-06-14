@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core.dependencies import get_db
 from app.core.security import verify_password
 from app.db.postgres import close_db, init_db
+from app.services.neo4j_store import get_neo4j_store
 from app.services.redis_client import close_redis
 from app.db.models import User
 
@@ -39,6 +40,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting FlexSearch Backend...")
     await init_db()
     logger.info("Database initialized")
+    try:
+        get_neo4j_store().ensure_schema()
+        logger.info("Neo4j schema ensured")
+    except Exception as exc:
+        logger.warning("Neo4j schema bootstrap skipped: %s", exc)
     yield
     # Shutdown
     logger.info("Shutting down FlexSearch Backend...")

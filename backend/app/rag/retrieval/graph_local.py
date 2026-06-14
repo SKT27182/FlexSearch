@@ -10,7 +10,11 @@ from app.rag.retrieval.graph_local_microsoft import (
     build_microsoft_graph_local,
 )
 from app.rag.retrieval.graph_local_neo4j import Neo4jGraphLocalRetrieval
-from app.schemas.rag_config import GraphLocalRetrievalParams, GraphRetrievalConfig
+from app.schemas.rag_config import (
+    GraphLocalRetrievalParams,
+    GraphRetrievalConfig,
+    MicrosoftGraphLocalRetrievalParams,
+)
 
 GraphBackend = Literal["neo4j", "microsoft"]
 
@@ -22,7 +26,7 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
         self,
         *,
         graph_backend: GraphBackend,
-        microsoft_params: GraphLocalRetrievalParams | None = None,
+        microsoft_params: MicrosoftGraphLocalRetrievalParams | None = None,
         neo4j_config: GraphRetrievalConfig | None = None,
     ) -> None:
         self._graph_backend = graph_backend
@@ -31,7 +35,7 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
                 neo4j_config or GraphRetrievalConfig(strategy="graph_local")
             )
         else:
-            params = microsoft_params or GraphLocalRetrievalParams()
+            params = microsoft_params or MicrosoftGraphLocalRetrievalParams()
             self._delegate = build_microsoft_graph_local(params)
 
     @property
@@ -50,7 +54,7 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
 def build_graph_local(
     *,
     graph_backend: GraphBackend = "microsoft",
-    microsoft_params: GraphLocalRetrievalParams | None = None,
+    microsoft_params: MicrosoftGraphLocalRetrievalParams | None = None,
     neo4j_config: GraphRetrievalConfig | None = None,
 ) -> GraphLocalRetrieval:
     return GraphLocalRetrieval(

@@ -2,6 +2,7 @@
 Build RAG strategy instances from RagConfig.
 """
 
+from app.db.models import RagMode
 from app.rag.chunking import (
     BaseChunkingStrategy,
     FixedWindowChunking,
@@ -24,15 +25,18 @@ from app.rag.retrieval import (
 from app.schemas.rag_config import (
     ChunkingConfig,
     ExtractionConfig,
-    GraphGlobalRetrievalParams,
-    GraphLocalRetrievalParams,
-    RagConfig,
+    GraphExtractionConfig,
+    GraphRagConfig,
+    GraphRetrievalConfig,
     RerankingConfig,
     RetrievalConfig,
+    VectorRagConfig,
 )
 
 
-def build_extraction_strategy(config: ExtractionConfig) -> BaseExtractionStrategy:
+def build_extraction_strategy(
+    config: ExtractionConfig | GraphExtractionConfig,
+) -> BaseExtractionStrategy:
     if config.strategy == "vlm":
         return VLMExtractionStrategy()
     return OCRExtractionStrategy()
@@ -65,21 +69,15 @@ def build_chunking_strategy(config: ChunkingConfig) -> BaseChunkingStrategy:
             )
 
 
-def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
+def build_retrieval_strategy(
+    config: RetrievalConfig,
+    *,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> BaseRetrievalStrategy:
+    if rag_mode == RagMode.GRAPH:
+        raise ValueError("Use build_graph_retrieval_strategy for graph projects")
     params = config.resolved_params()
     match config.strategy:
-        case "graph_local":
-            assert isinstance(params, GraphLocalRetrievalParams)
-            return GraphLocalRetrieval(
-                graph_backend="microsoft",
-                microsoft_params=params,
-            )
-        case "graph_global":
-            assert isinstance(params, GraphGlobalRetrievalParams)
-            return GraphGlobalRetrieval(
-                graph_backend="microsoft",
-                microsoft_params=params,
-            )
         case "parent_child":
             return ParentChildRetrieval()
         case "hybrid":
@@ -90,7 +88,47 @@ def build_retrieval_strategy(config: RetrievalConfig) -> BaseRetrievalStrategy:
             return DenseRetrieval(score_threshold=params.score_threshold)
 
 
-def build_reranking_strategy(config: RerankingConfig) -> BaseRerankingStrategy:
+def build_graph_retrieval_strategy(
+    config: GraphRagConfig | GraphRetrievalConfig,
+) -> BaseRetrievalStrategy:
+    if isinstance(config, GraphRagConfig):
+        graph_backend = config.graph_backend
+        retrieval = config.retrieval
+    else:
+        graph_backend = "neo4j"
+        retrieval = config
+
+    if retrieval.strategy == "graph_global":
+        if graph_backend == "microsoft":
+            params = retrieval.resolved_params("microsoft")
+            return GraphGlobalRetrieval(
+                graph_backend="microsoft",
+                microsoft_params=params,  # type: ignore[arg-type]
+            )
+        return GraphGlobalRetrieval(
+            graph_backend="neo4j",
+            neo4j_config=retrieval,
+        )
+
+    if graph_backend == "microsoft":
+        params = retrieval.resolved_params("microsoft")
+        return GraphLocalRetrieval(
+            graph_backend="microsoft",
+            microsoft_params=params,  # type: ignore[arg-type]
+        )
+    return GraphLocalRetrieval(
+        graph_backend="neo4j",
+        neo4j_config=retrieval,
+    )
+
+
+def build_reranking_strategy(
+    config: RerankingConfig,
+    *,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> BaseRerankingStrategy:
+    if rag_mode == RagMode.GRAPH:
+        return NoReranking()
     if config.strategy == "cross_encoder":
         model_name = config.params.get(
             "model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -99,15 +137,28 @@ def build_reranking_strategy(config: RerankingConfig) -> BaseRerankingStrategy:
     return NoReranking()
 
 
-def build_pipeline_strategies(rag_config: RagConfig) -> tuple[
+def build_pipeline_strategies(
+    rag_config: VectorRagConfig | GraphRagConfig,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> tuple[
     BaseExtractionStrategy,
-    BaseChunkingStrategy,
+    BaseChunkingStrategy | None,
     BaseRetrievalStrategy,
     BaseRerankingStrategy,
 ]:
+    extraction = build_extraction_strategy(rag_config.extraction)
+    if rag_mode == RagMode.GRAPH:
+        assert isinstance(rag_config, GraphRagConfig)
+        return (
+            extraction,
+            None,
+            build_graph_retrieval_strategy(rag_config),
+            NoReranking(),
+        )
+    assert isinstance(rag_config, VectorRagConfig)
     return (
-        build_extraction_strategy(rag_config.extraction),
+        extraction,
         build_chunking_strategy(rag_config.chunking),
-        build_retrieval_strategy(rag_config.retrieval),
-        build_reranking_strategy(rag_config.reranking),
+        build_retrieval_strategy(rag_config.retrieval, rag_mode=rag_mode),
+        build_reranking_strategy(rag_config.reranking, rag_mode=rag_mode),
     )

@@ -7,15 +7,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-GraphIndexStatus = Literal["pending", "indexing", "ready", "failed", "disabled"]
+GraphIndexStatusValue = Literal["pending", "indexing", "ready", "failed", "disabled"]
+GraphBackend = Literal["neo4j", "microsoft"]
 
 
 class GraphIndexState(BaseModel):
-    status: GraphIndexStatus = "pending"
-    indexed_at: datetime | None = None
+    backend: GraphBackend | None = None
+    status: GraphIndexStatusValue = "pending"
+    indexed_at: datetime | str | None = None
     fingerprint: str | None = None
     error: str | None = None
     document_count: int | None = None
+    entity_count: int | None = None
+    passage_count: int | None = None
 
     @classmethod
     def from_db(cls, data: dict[str, Any] | None) -> GraphIndexState:
@@ -24,17 +28,29 @@ class GraphIndexState(BaseModel):
         return cls.model_validate(data)
 
     def to_db(self) -> dict[str, Any]:
-        payload = self.model_dump(mode="json")
-        return payload
+        return self.model_dump(mode="json", exclude_none=True)
 
 
 class GraphIndexStatusResponse(BaseModel):
-    status: GraphIndexStatus
-    indexed_at: datetime | None = None
+    backend: GraphBackend | None = None
+    status: GraphIndexStatusValue
+    indexed_at: datetime | str | None = None
     fingerprint: str | None = None
     error: str | None = None
     document_count: int | None = None
+    entity_count: int | None = None
+    passage_count: int | None = None
 
 
-def default_graph_index() -> dict[str, Any]:
-    return GraphIndexState().to_db()
+def default_graph_index_status(
+    *,
+    backend: GraphBackend = "neo4j",
+) -> dict[str, Any]:
+    if backend == "microsoft":
+        return GraphIndexState(backend="microsoft", status="pending").to_db()
+    return GraphIndexState(
+        backend="neo4j",
+        status="pending",
+        entity_count=0,
+        passage_count=0,
+    ).to_db()

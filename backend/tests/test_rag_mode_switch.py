@@ -64,4 +64,4 @@ async def test_switch_vector_to_graph(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert get_resp.json()["rag_mode"] == "graph"
-    assert get_resp.json()["graph_index"]["status"] == "pending"
+    assert get_resp.json()["graph_index_status"]["status"] == "pending"

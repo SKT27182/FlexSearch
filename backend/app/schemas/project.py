@@ -4,15 +4,23 @@ FlexSearch Backend - Project Schemas
 Pydantic models for project endpoints.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.db.models import RagMode
 from app.schemas.graph_index import GraphIndexState, GraphIndexStatusResponse
-from app.schemas.rag_config import RagConfig
+from app.schemas.rag_config import (
+    GraphBackend,
+    GraphRagConfig,
+    VectorRagConfig,
+    default_rag_config_for_mode,
+    parse_rag_config,
+)
 
 
 class ProjectCreate(BaseModel):
@@ -20,8 +28,22 @@ class ProjectCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = Field(None, max_length=2000)
-    rag_mode: Literal["vector", "graph"] = "vector"
-    rag_config: RagConfig | None = None
+    rag_mode: RagMode = RagMode.VECTOR
+    rag_config: VectorRagConfig | GraphRagConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_config_mode(self) -> ProjectCreate:
+        if self.rag_config is None:
+            return self
+        if self.rag_mode == RagMode.VECTOR and not isinstance(
+            self.rag_config, VectorRagConfig
+        ):
+            raise ValueError("Vector projects require vector RAG configuration")
+        if self.rag_mode == RagMode.GRAPH and not isinstance(
+            self.rag_config, GraphRagConfig
+        ):
+            raise ValueError("Graph projects require graph RAG configuration")
+        return self
 
 
 class ProjectUpdate(BaseModel):
@@ -29,13 +51,21 @@ class ProjectUpdate(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = Field(None, max_length=2000)
-    rag_config: RagConfig | None = None
+    rag_mode: RagMode | None = None
+    rag_config: VectorRagConfig | GraphRagConfig | None = None
+
+    @model_validator(mode="after")
+    def reject_rag_mode_change(self) -> ProjectUpdate:
+        if self.rag_mode is not None:
+            raise ValueError("rag_mode cannot be changed after project creation")
+        return self
 
 
 class RagModeSwitchRequest(BaseModel):
     """Destructive switch between vector and graph RAG modes."""
 
     rag_mode: Literal["vector", "graph"]
+    graph_backend: GraphBackend | None = None
 
 
 class RagModeSwitchResponse(BaseModel):
@@ -51,9 +81,9 @@ class ProjectResponse(BaseModel):
     name: str
     description: str | None
     owner_id: UUID
-    rag_mode: Literal["vector", "graph"]
-    rag_config: RagConfig
-    graph_index: GraphIndexStatusResponse
+    rag_mode: RagMode
+    rag_config: VectorRagConfig | GraphRagConfig
+    graph_index_status: GraphIndexStatusResponse | None = None
     created_at: datetime
     updated_at: datetime
     document_count: int = 0
@@ -80,25 +110,58 @@ class ReindexResponse(BaseModel):
     message: str
 
 
+def _graph_index_response(
+    data: dict[str, Any] | None,
+) -> GraphIndexStatusResponse | None:
+    if not data:
+        return None
+    state = GraphIndexState.from_db(data)
+    return GraphIndexStatusResponse(
+        backend=state.backend,
+        status=state.status,
+        indexed_at=state.indexed_at,
+        fingerprint=state.fingerprint,
+        error=state.error,
+        document_count=state.document_count,
+        entity_count=state.entity_count,
+        passage_count=state.passage_count,
+    )
+
+
 def project_to_response(project: Any, document_count: int = 0) -> ProjectResponse:
-    graph_index = GraphIndexState.from_db(getattr(project, "graph_index", None) or {})
-    rag_mode = getattr(project, "rag_mode", RagMode.VECTOR)
-    mode_value = rag_mode.value if isinstance(rag_mode, RagMode) else str(rag_mode)
+    rag_mode = project.rag_mode
+    if isinstance(rag_mode, str):
+        rag_mode = RagMode(rag_mode)
+    rag_config = parse_rag_config(rag_mode, project.rag_config)
     return ProjectResponse(
         id=project.id,
         name=project.name,
         description=project.description,
         owner_id=project.owner_id,
-        rag_mode=mode_value,  # type: ignore[arg-type]
-        rag_config=RagConfig.from_db(project.rag_config),
-        graph_index=GraphIndexStatusResponse(
-            status=graph_index.status,
-            indexed_at=graph_index.indexed_at,
-            fingerprint=graph_index.fingerprint,
-            error=graph_index.error,
-            document_count=graph_index.document_count,
-        ),
+        rag_mode=rag_mode,
+        rag_config=rag_config,
+        graph_index_status=_graph_index_response(project.graph_index_status),
         created_at=project.created_at,
         updated_at=project.updated_at,
         document_count=document_count,
     )
+
+
+def resolve_create_rag_config(
+    rag_mode: RagMode,
+    rag_config: VectorRagConfig | GraphRagConfig | None,
+) -> dict[str, Any]:
+    if rag_config is not None:
+        return rag_config.to_db()
+    return default_rag_config_for_mode(rag_mode).to_db()
+
+
+def graph_backend_for_project(
+    rag_mode: RagMode,
+    rag_config: dict[str, Any] | None,
+) -> GraphBackend:
+    if rag_mode != RagMode.GRAPH:
+        return "neo4j"
+    if rag_config and rag_config.get("graph_backend") == "microsoft":
+        return "microsoft"
+    return "neo4j"

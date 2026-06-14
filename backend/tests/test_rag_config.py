@@ -1,19 +1,27 @@
 """Tests for RagConfig schemas and factory."""
 
+from app.db.models import RagMode
 from app.rag.factory import (
     build_chunking_strategy,
     build_extraction_strategy,
+    build_graph_retrieval_strategy,
     build_retrieval_strategy,
 )
+from app.rag.retrieval.graph_local import GraphLocalRetrieval
 from app.rag.retrieval.sparse import SparseRetrieval
 from app.rag.chunking import FixedWindowChunking, RecursiveChunking
 from app.schemas.rag_config import (
     ChunkingConfig,
     EffectiveRagConfig,
     ExtractionConfig,
-    RagConfig,
+    GraphRagConfig,
+    GraphRetrievalConfig,
+    VectorRagConfig,
     RetrievalConfig,
+    VECTOR_RETRIEVAL_STRATEGIES,
+    GRAPH_RETRIEVAL_STRATEGIES,
     extraction_fingerprint,
+    parse_rag_config,
 )
 
 
@@ -41,7 +49,7 @@ def test_factory_recursive() -> None:
 
 
 def test_rag_config_from_settings_shape() -> None:
-    cfg = RagConfig.from_settings()
+    cfg = VectorRagConfig.from_settings()
     assert cfg.extraction.strategy in ("ocr", "vlm")
     assert cfg.chunking.strategy in (
         "fixed_window",
@@ -52,7 +60,7 @@ def test_rag_config_from_settings_shape() -> None:
 
 
 def test_effective_rag_config_top_k_from_request() -> None:
-    project = RagConfig.from_settings()
+    project = VectorRagConfig.from_settings()
     effective = EffectiveRagConfig.for_retrieval(project, None, top_k=3)
     assert effective.top_k == 3
 
@@ -60,7 +68,7 @@ def test_effective_rag_config_top_k_from_request() -> None:
 def test_effective_rag_config_top_k_override_wins() -> None:
     from app.schemas.rag_config import RetrievalOverrides
 
-    project = RagConfig.from_settings()
+    project = VectorRagConfig.from_settings()
     effective = EffectiveRagConfig.for_retrieval(
         project,
         RetrievalOverrides(top_k=7),
@@ -85,12 +93,35 @@ def test_hybrid_retrieval_factory() -> None:
     assert r._rrf_k == 42
 
 
-def test_graph_local_retrieval_factory() -> None:
+def test_microsoft_graph_local_retrieval_factory() -> None:
     from app.rag.retrieval.graph_local import GraphLocalRetrieval
 
-    r = build_retrieval_strategy(
-        RetrievalConfig(strategy="graph_local", params={"community_level": 3})
+    cfg = GraphRagConfig.from_settings(graph_backend="microsoft")
+    r = build_graph_retrieval_strategy(cfg)
+    assert isinstance(r, GraphLocalRetrieval)
+    assert r.name == "graph_local"
+
+
+def test_neo4j_graph_retrieval_factory() -> None:
+    r = build_graph_retrieval_strategy(
+        GraphRagConfig(
+            graph_backend="neo4j",
+            retrieval=GraphRetrievalConfig(
+                strategy="graph_local", params={"max_hops": 2}
+            ),
+        )
     )
     assert isinstance(r, GraphLocalRetrieval)
     assert r.name == "graph_local"
-    assert r._community_level == 3
+
+
+def test_parse_rag_config_modes() -> None:
+    vector = parse_rag_config(RagMode.VECTOR, {"chunking": {"strategy": "fixed_window"}})
+    graph = parse_rag_config(RagMode.GRAPH, {"retrieval": {"strategy": "graph_global"}})
+    assert isinstance(vector, VectorRagConfig)
+    assert isinstance(graph, GraphRagConfig)
+
+
+def test_retrieval_strategy_sets() -> None:
+    assert "dense" in VECTOR_RETRIEVAL_STRATEGIES
+    assert "graph_local" in GRAPH_RETRIEVAL_STRATEGIES

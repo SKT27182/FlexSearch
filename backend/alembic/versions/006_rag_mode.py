@@ -1,4 +1,4 @@
-"""Add rag_mode and graph_index to projects
+"""Add project rag_mode and graph_index_status
 
 Revision ID: 006
 Revises: 005
@@ -8,6 +8,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = "006"
 down_revision: Union[str, None] = "005"
@@ -27,15 +28,10 @@ def upgrade() -> None:
     )
     op.add_column(
         "projects",
-        sa.Column(
-            "graph_index",
-            sa.JSON(),
-            nullable=False,
-            server_default=sa.text("'{}'"),
-        ),
+        sa.Column("graph_index_status", JSONB(), nullable=True),
     )
 
 
 def downgrade() -> None:
-    op.drop_column("projects", "graph_index")
+    op.drop_column("projects", "graph_index_status")
     op.drop_column("projects", "rag_mode")

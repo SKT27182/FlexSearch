@@ -1,36 +1,28 @@
-"""Tests for rag_mode configuration helpers."""
+"""Graph mode config defaults."""
 
 from app.db.models import RagMode
-from app.schemas.rag_config import RagConfig
-from app.services.retrieval_validation import validate_retrieval_for_mode
+from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
 
 
-def test_for_mode_graph_defaults() -> None:
-    cfg = RagConfig.for_mode(RagMode.GRAPH)
-    assert cfg.retrieval.strategy == "graph_local"
-    assert cfg.graph_indexing.enabled is True
+def test_graph_mode_defaults_microsoft() -> None:
+    cfg = GraphRagConfig.from_settings(graph_backend="microsoft")
+    assert cfg.graph_backend == "microsoft"
+    assert cfg.microsoft_indexing.enabled is True
 
 
 def test_graph_indexing_fingerprint_changes_with_method() -> None:
-    a = RagConfig.for_mode(RagMode.GRAPH)
-    b = RagConfig.for_mode(RagMode.GRAPH)
-    b.graph_indexing.method = "nlp"
+    a = GraphRagConfig.from_settings(graph_backend="microsoft")
+    b = GraphRagConfig.from_settings(graph_backend="microsoft")
+    b.microsoft_indexing.method = "nlp"
     assert a.graph_indexing_fingerprint() != b.graph_indexing_fingerprint()
 
 
-def test_validate_graph_strategy_on_vector_project() -> None:
-    cfg = RagConfig.from_settings()
-    err = validate_retrieval_for_mode(RagMode.VECTOR, cfg, None)
-    assert err is None
-    cfg.retrieval.strategy = "graph_local"
-    err = validate_retrieval_for_mode(RagMode.VECTOR, cfg, None)
-    assert err is not None
+def test_vector_mode_has_chunking() -> None:
+    cfg = VectorRagConfig.from_db({"chunking": {"strategy": "fixed_window", "params": {}}})
+    assert cfg.chunking.strategy == "fixed_window"
 
 
-def test_validate_vector_strategy_on_graph_project() -> None:
-    cfg = RagConfig.for_mode(RagMode.GRAPH)
-    err = validate_retrieval_for_mode(RagMode.GRAPH, cfg, None)
-    assert err is None
-    cfg.retrieval.strategy = "dense"
-    err = validate_retrieval_for_mode(RagMode.GRAPH, cfg, None)
-    assert err is not None
+def test_graph_neo4j_defaults() -> None:
+    cfg = GraphRagConfig.from_settings(graph_backend="neo4j")
+    assert cfg.graph_backend == "neo4j"
+    assert cfg.indexing.embed_entities is True

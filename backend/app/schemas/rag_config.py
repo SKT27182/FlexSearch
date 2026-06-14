@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -15,7 +15,8 @@ from app.db.models import RagMode
 
 VectorRetrievalStrategy = Literal["dense", "parent_child", "hybrid", "bm25"]
 GraphRetrievalStrategy = Literal["graph_local", "graph_global"]
-RetrievalStrategy = VectorRetrievalStrategy | GraphRetrievalStrategy
+GraphBackend = Literal["neo4j", "microsoft"]
+AllRetrievalStrategy = Union[VectorRetrievalStrategy, GraphRetrievalStrategy]
 
 
 class ExtractionConfig(BaseModel):
@@ -75,42 +76,11 @@ class Bm25RetrievalParams(BaseModel):
     b: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
-class GraphIndexingConfig(BaseModel):
-    enabled: bool = True
-    method: Literal["standard", "nlp"] = "standard"
-    community_level: int = Field(default=2, ge=0, le=4)
-
-
-class GraphLocalRetrievalParams(BaseModel):
-    community_level: int = Field(default=2, ge=0, le=4)
-    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
-
-
-class GraphGlobalRetrievalParams(BaseModel):
-    community_level: int = Field(default=2, ge=0, le=4)
-    dynamic_community_selection: bool = False
-    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
-
-
-class GraphRetrievalConfig(BaseModel):
-    strategy: GraphRetrievalStrategy = "graph_local"
-    params: dict[str, Any] = Field(default_factory=dict)
-
-    def resolved_params(self) -> BaseModel:
-        if self.strategy == "graph_global":
-            return GraphGlobalRetrievalParams.model_validate(self.params)
-        return GraphLocalRetrievalParams.model_validate(self.params)
-
-
 class RetrievalConfig(BaseModel):
-    strategy: RetrievalStrategy = "dense"
+    strategy: VectorRetrievalStrategy = "dense"
     params: dict[str, Any] = Field(default_factory=dict)
 
     def resolved_params(self) -> BaseModel:
-        if self.strategy == "graph_global":
-            return GraphGlobalRetrievalParams.model_validate(self.params)
-        if self.strategy == "graph_local":
-            return GraphLocalRetrievalParams.model_validate(self.params)
         if self.strategy == "hybrid":
             return HybridRetrievalParams.model_validate(self.params)
         if self.strategy == "bm25":
@@ -125,59 +95,24 @@ class RerankingConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class RagConfig(BaseModel):
+class VectorRagConfig(BaseModel):
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
-    graph_indexing: GraphIndexingConfig = Field(default_factory=GraphIndexingConfig)
-    graph_retrieval: GraphRetrievalConfig = Field(default_factory=GraphRetrievalConfig)
 
     @classmethod
-    def for_mode(cls, mode: RagMode, s: Settings | None = None) -> RagConfig:
+    def from_settings(cls, s: Settings | None = None) -> VectorRagConfig:
         s = s or settings
-        if mode == RagMode.GRAPH:
-            return cls(
-                extraction=ExtractionConfig(strategy=s.extraction_strategy),
-                chunking=ChunkingConfig(strategy="fixed_window", params={}),
-                retrieval=RetrievalConfig(
-                    strategy="graph_local",
-                    params={"community_level": s.graphrag_community_level},
-                ),
-                reranking=RerankingConfig(strategy="none", params={}),
-                graph_indexing=GraphIndexingConfig(
-                    enabled=True,
-                    method="standard",
-                    community_level=s.graphrag_community_level,
-                ),
-                graph_retrieval=GraphRetrievalConfig(
-                    strategy="graph_local",
-                    params={"community_level": s.graphrag_community_level},
-                ),
-            )
-        return cls.from_settings(s)
-
-    @classmethod
-    def from_settings(cls, s: Settings | None = None) -> RagConfig:
-        s = s or settings
-        chunk_defaults: dict[str, Any] = {}
-        retrieval_defaults: dict[str, Any] = {}
-        rerank_defaults: dict[str, Any] = {}
         return cls(
             extraction=ExtractionConfig(strategy=s.extraction_strategy),
-            chunking=ChunkingConfig(
-                strategy=s.chunking_strategy,
-                params=chunk_defaults,
-            ),
-            retrieval=RetrievalConfig(
-                strategy=s.retrieval_strategy,
-                params=retrieval_defaults,
-            ),
-            reranking=RerankingConfig(strategy=s.reranking_strategy, params=rerank_defaults),
+            chunking=ChunkingConfig(strategy=s.chunking_strategy, params={}),
+            retrieval=RetrievalConfig(strategy=s.retrieval_strategy, params={}),
+            reranking=RerankingConfig(strategy=s.reranking_strategy, params={}),
         )
 
     @classmethod
-    def from_db(cls, data: dict[str, Any] | None) -> RagConfig:
+    def from_db(cls, data: dict[str, Any] | None) -> VectorRagConfig:
         if not data:
             return cls.from_settings()
         return cls.model_validate(data)
@@ -186,28 +121,171 @@ class RagConfig(BaseModel):
         return self.model_dump(mode="json")
 
     def ingestion_fingerprint(self) -> str:
-        """Hash extraction + chunking (used to decide full vs partial reprocess)."""
         payload = {
             "extraction": self.extraction.model_dump(mode="json"),
             "chunking": self.chunking.model_dump(mode="json"),
         }
         return _stable_hash(payload)
 
-    def graph_indexing_fingerprint(self) -> str:
-        payload = {
-            "graph_indexing": self.graph_indexing.model_dump(mode="json"),
+
+# Backward-compatible alias
+RagConfig = VectorRagConfig
+
+
+class GraphExtractionConfig(BaseModel):
+    strategy: Literal["ocr", "vlm"] = "ocr"
+    passage_chunk_size: int = Field(default=800, ge=200, le=4096)
+
+
+class GraphIndexingConfig(BaseModel):
+    """Neo4j per-passage entity extraction settings."""
+
+    max_entities_per_passage: int = Field(default=20, ge=1, le=100)
+    embed_entities: bool = Field(default=True)
+
+
+class MicrosoftGraphIndexingConfig(BaseModel):
+    enabled: bool = True
+    method: Literal["standard", "nlp"] = "standard"
+    community_level: int = Field(default=2, ge=0, le=4)
+
+
+class GraphLocalRetrievalParams(BaseModel):
+    """Neo4j graph_local params."""
+
+    max_hops: int = Field(default=2, ge=1, le=5)
+    top_entities: int = Field(default=10, ge=1, le=50)
+
+
+class GraphGlobalRetrievalParams(BaseModel):
+    """Neo4j graph_global params."""
+
+    top_passages: int = Field(default=5, ge=1, le=50)
+
+
+class MicrosoftGraphLocalRetrievalParams(BaseModel):
+    community_level: int = Field(default=2, ge=0, le=4)
+    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
+
+
+class MicrosoftGraphGlobalRetrievalParams(BaseModel):
+    community_level: int = Field(default=2, ge=0, le=4)
+    dynamic_community_selection: bool = False
+    max_context_tokens: int = Field(default=12000, ge=1000, le=50000)
+
+
+class GraphRetrievalConfig(BaseModel):
+    strategy: GraphRetrievalStrategy = "graph_local"
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    def resolved_params(self, graph_backend: GraphBackend = "neo4j") -> BaseModel:
+        if graph_backend == "microsoft":
+            if self.strategy == "graph_global":
+                return MicrosoftGraphGlobalRetrievalParams.model_validate(self.params)
+            return MicrosoftGraphLocalRetrievalParams.model_validate(self.params)
+        if self.strategy == "graph_global":
+            return GraphGlobalRetrievalParams.model_validate(self.params)
+        return GraphLocalRetrievalParams.model_validate(self.params)
+
+
+class GraphRagConfig(BaseModel):
+    graph_backend: GraphBackend = "neo4j"
+    extraction: GraphExtractionConfig = Field(default_factory=GraphExtractionConfig)
+    indexing: GraphIndexingConfig = Field(default_factory=GraphIndexingConfig)
+    microsoft_indexing: MicrosoftGraphIndexingConfig = Field(
+        default_factory=MicrosoftGraphIndexingConfig
+    )
+    retrieval: GraphRetrievalConfig = Field(default_factory=GraphRetrievalConfig)
+
+    @classmethod
+    def from_settings(
+        cls,
+        s: Settings | None = None,
+        *,
+        graph_backend: GraphBackend = "neo4j",
+    ) -> GraphRagConfig:
+        s = s or settings
+        return cls(
+            graph_backend=graph_backend,
+            extraction=GraphExtractionConfig(strategy=s.extraction_strategy),
+            microsoft_indexing=MicrosoftGraphIndexingConfig(
+                community_level=s.graphrag_community_level,
+            ),
+            retrieval=GraphRetrievalConfig(
+                strategy="graph_local",
+                params=(
+                    {"community_level": s.graphrag_community_level}
+                    if graph_backend == "microsoft"
+                    else {}
+                ),
+            ),
+        )
+
+    @classmethod
+    def from_db(cls, data: dict[str, Any] | None) -> GraphRagConfig:
+        if not data:
+            return cls.from_settings()
+        return cls.model_validate(data)
+
+    def to_db(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+    def ingestion_fingerprint(self) -> str:
+        payload: dict[str, Any] = {
+            "graph_backend": self.graph_backend,
             "extraction": self.extraction.model_dump(mode="json"),
+            "indexing": self.indexing.model_dump(mode="json"),
         }
+        if self.graph_backend == "microsoft":
+            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(mode="json")
         return _stable_hash(payload)
 
-    def is_graph_retrieval(self) -> bool:
-        return self.retrieval.strategy in ("graph_local", "graph_global")
+    def graph_indexing_fingerprint(self) -> str:
+        payload: dict[str, Any] = {
+            "graph_backend": self.graph_backend,
+            "extraction": self.extraction.model_dump(mode="json"),
+        }
+        if self.graph_backend == "microsoft":
+            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(mode="json")
+        else:
+            payload["indexing"] = self.indexing.model_dump(mode="json")
+        return _stable_hash(payload)
 
-    def is_vector_retrieval(self) -> bool:
-        return not self.is_graph_retrieval()
+
+def parse_rag_config(
+    rag_mode: RagMode | str,
+    data: dict[str, Any] | None,
+) -> VectorRagConfig | GraphRagConfig:
+    mode = rag_mode if isinstance(rag_mode, RagMode) else RagMode(rag_mode)
+    if mode == RagMode.GRAPH:
+        return GraphRagConfig.from_db(data)
+    return VectorRagConfig.from_db(data)
 
 
-def extraction_fingerprint(extraction: ExtractionConfig) -> str:
+def default_rag_config_for_mode(
+    rag_mode: RagMode | str,
+    *,
+    graph_backend: GraphBackend = "neo4j",
+) -> VectorRagConfig | GraphRagConfig:
+    mode = rag_mode if isinstance(rag_mode, RagMode) else RagMode(rag_mode)
+    if mode == RagMode.GRAPH:
+        return GraphRagConfig.from_settings(graph_backend=graph_backend)
+    return VectorRagConfig.from_settings()
+
+
+def graph_backend_of(config: VectorRagConfig | GraphRagConfig) -> GraphBackend | None:
+    if isinstance(config, GraphRagConfig):
+        return config.graph_backend
+    return None
+
+
+VECTOR_RETRIEVAL_STRATEGIES: frozenset[str] = frozenset(
+    {"dense", "parent_child", "hybrid", "bm25"}
+)
+GRAPH_RETRIEVAL_STRATEGIES: frozenset[str] = frozenset({"graph_local", "graph_global"})
+
+
+def extraction_fingerprint(extraction: ExtractionConfig | GraphExtractionConfig) -> str:
     return _stable_hash(extraction.model_dump(mode="json"))
 
 
@@ -217,7 +295,7 @@ def _stable_hash(payload: dict[str, Any]) -> str:
 
 
 class RetrievalOverrides(BaseModel):
-    retrieval_strategy: RetrievalStrategy | None = None
+    retrieval_strategy: AllRetrievalStrategy | None = None
     reranking_strategy: Literal["none", "cross_encoder"] | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)
     retrieval_params: dict[str, Any] = Field(default_factory=dict)
@@ -230,7 +308,7 @@ class RetrievalOverrides(BaseModel):
 
 
 class EffectiveRagConfig(BaseModel):
-    """Merged project config with per-query retrieval overrides."""
+    """Merged vector project config with per-query retrieval overrides."""
 
     extraction: ExtractionConfig
     chunking: ChunkingConfig
@@ -241,7 +319,7 @@ class EffectiveRagConfig(BaseModel):
     @classmethod
     def for_retrieval(
         cls,
-        project: RagConfig,
+        project: VectorRagConfig,
         overrides: RetrievalOverrides | None = None,
         *,
         top_k: int | None = None,
@@ -250,7 +328,9 @@ class EffectiveRagConfig(BaseModel):
         retrieval = project.retrieval.model_copy(deep=True)
         reranking = project.reranking.model_copy(deep=True)
         if overrides.retrieval_strategy is not None:
-            retrieval.strategy = overrides.retrieval_strategy
+            if overrides.retrieval_strategy not in VECTOR_RETRIEVAL_STRATEGIES:
+                raise ValueError("Invalid vector retrieval strategy override")
+            retrieval.strategy = overrides.retrieval_strategy  # type: ignore[assignment]
             retrieval.params = dict(overrides.retrieval_params)
         elif overrides.retrieval_params:
             retrieval.params = {**retrieval.params, **overrides.retrieval_params}
@@ -270,5 +350,48 @@ class EffectiveRagConfig(BaseModel):
             chunking=project.chunking,
             retrieval=retrieval,
             reranking=reranking,
+            top_k=resolved_top_k,
+        )
+
+
+class GraphEffectiveRagConfig(BaseModel):
+    """Merged graph project config with per-query retrieval overrides."""
+
+    graph_backend: GraphBackend
+    extraction: GraphExtractionConfig
+    indexing: GraphIndexingConfig
+    microsoft_indexing: MicrosoftGraphIndexingConfig
+    retrieval: GraphRetrievalConfig
+    top_k: int = 5
+
+    @classmethod
+    def for_retrieval(
+        cls,
+        project: GraphRagConfig,
+        overrides: RetrievalOverrides | None = None,
+        *,
+        top_k: int | None = None,
+    ) -> GraphEffectiveRagConfig:
+        overrides = overrides or RetrievalOverrides()
+        retrieval = project.retrieval.model_copy(deep=True)
+        if overrides.retrieval_strategy is not None:
+            if overrides.retrieval_strategy not in GRAPH_RETRIEVAL_STRATEGIES:
+                raise ValueError("Invalid graph retrieval strategy override")
+            retrieval.strategy = overrides.retrieval_strategy  # type: ignore[assignment]
+            retrieval.params = dict(overrides.retrieval_params)
+        elif overrides.retrieval_params:
+            retrieval.params = {**retrieval.params, **overrides.retrieval_params}
+        if overrides.top_k is not None:
+            resolved_top_k = overrides.top_k
+        elif top_k is not None:
+            resolved_top_k = top_k
+        else:
+            resolved_top_k = 5
+        return cls(
+            graph_backend=project.graph_backend,
+            extraction=project.extraction,
+            indexing=project.indexing,
+            microsoft_indexing=project.microsoft_indexing,
+            retrieval=retrieval,
             top_k=resolved_top_k,
         )

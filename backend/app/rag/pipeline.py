@@ -9,17 +9,27 @@ from __future__ import annotations
 from typing import Any
 from uuid import NAMESPACE_DNS, uuid5
 
+from app.db.models import RagMode
 from app.rag.chunking.base import Chunk
 from app.rag.embedding import get_embedding_service
 from app.rag.factory import (
     build_chunking_strategy,
     build_extraction_strategy,
+    build_graph_retrieval_strategy,
     build_reranking_strategy,
     build_retrieval_strategy,
 )
 from app.rag.ingestion.base import ExtractedContent, ExtractionProgressCallback
 from app.rag.retrieval.base import RetrievalResult
-from app.schemas.rag_config import EffectiveRagConfig, RagConfig, RetrievalOverrides
+from app.schemas.rag_config import (
+    EffectiveRagConfig,
+    GraphEffectiveRagConfig,
+    GraphRagConfig,
+    RagConfig,
+    RetrievalOverrides,
+    VectorRagConfig,
+)
+from app.services.neo4j_store import get_neo4j_store
 from app.services.vector_store import get_vector_store
 from app.utils.logger import create_logger
 
@@ -27,18 +37,32 @@ logger = create_logger(__name__)
 
 
 class RAGPipeline:
-    """RAG pipeline with per-project configuration."""
+    """RAG pipeline with per-project configuration and mode."""
 
-    def __init__(self, config: RagConfig) -> None:
+    def __init__(
+        self,
+        config: VectorRagConfig | GraphRagConfig,
+        rag_mode: RagMode = RagMode.VECTOR,
+    ) -> None:
         self._config = config
+        self._rag_mode = rag_mode
         self._extraction = build_extraction_strategy(config.extraction)
-        self._chunking = build_chunking_strategy(config.chunking)
         self._embedding = get_embedding_service()
         self._vector_store = get_vector_store()
+        self._neo4j = get_neo4j_store()
+        if rag_mode == RagMode.VECTOR:
+            assert isinstance(config, VectorRagConfig)
+            self._chunking = build_chunking_strategy(config.chunking)
+        else:
+            self._chunking = None
 
     @property
-    def config(self) -> RagConfig:
+    def config(self) -> VectorRagConfig | GraphRagConfig:
         return self._config
+
+    @property
+    def rag_mode(self) -> RagMode:
+        return self._rag_mode
 
     async def extract_document(
         self,
@@ -63,6 +87,8 @@ class RAGPipeline:
         project_id: str,
         page_count: int = 0,
     ) -> list[Chunk]:
+        if self._chunking is None:
+            raise RuntimeError("chunk_text is only available for vector mode")
         return self._chunking.chunk(
             text=text,
             document_id=document_id,
@@ -80,6 +106,8 @@ class RAGPipeline:
         project_id: str,
         filename: str,
     ) -> int:
+        if self._rag_mode == RagMode.GRAPH:
+            raise RuntimeError("index_chunks is not used in graph mode")
         if not chunks:
             return 0
         chunk_texts = [chunk.content for chunk in chunks]
@@ -123,11 +151,28 @@ class RAGPipeline:
         top_k: int = 5,
         overrides: RetrievalOverrides | None = None,
     ) -> tuple[list[RetrievalResult], str, str]:
+        if self._rag_mode == RagMode.GRAPH:
+            assert isinstance(self._config, GraphRagConfig)
+            effective = GraphEffectiveRagConfig.for_retrieval(
+                self._config, overrides, top_k=top_k
+            )
+            retrieval = build_graph_retrieval_strategy(effective.retrieval)
+            k = effective.top_k
+            results = await retrieval.retrieve(
+                query=query,
+                project_id=project_id,
+                top_k=k,
+            )
+            return results, retrieval.name, "none"
+
+        assert isinstance(self._config, VectorRagConfig)
         effective = EffectiveRagConfig.for_retrieval(
             self._config, overrides, top_k=top_k
         )
-        retrieval = build_retrieval_strategy(effective.retrieval)
-        reranking = build_reranking_strategy(effective.reranking)
+        retrieval = build_retrieval_strategy(effective.retrieval, rag_mode=self._rag_mode)
+        reranking = build_reranking_strategy(
+            effective.reranking, rag_mode=self._rag_mode
+        )
         k = effective.top_k
 
         results = await retrieval.retrieve(
@@ -164,20 +209,40 @@ class RAGPipeline:
         }
 
     def delete_project_data(self, project_id: str) -> None:
-        self._vector_store.delete_by_project(project_id)
-        logger.info(f"Deleted RAG data for project: {project_id}")
+        if self._rag_mode == RagMode.GRAPH:
+            self._neo4j.delete_project_subgraph(project_id)
+            logger.info("Deleted Neo4j graph for project: %s", project_id)
+        else:
+            self._vector_store.delete_by_project(project_id)
+            logger.info("Deleted Qdrant data for project: %s", project_id)
 
-    def delete_document_data(self, document_id: str) -> None:
-        self._vector_store.delete_by_document(document_id)
-        logger.info(f"Deleted RAG data for document: {document_id}")
+    def delete_document_data(self, document_id: str, project_id: str | None = None) -> None:
+        if self._rag_mode == RagMode.GRAPH:
+            if not project_id:
+                logger.warning(
+                    "Graph document delete requires project_id for %s",
+                    document_id,
+                )
+                return
+            self._neo4j.delete_document_subgraph(project_id, document_id)
+            logger.info("Deleted Neo4j data for document: %s", document_id)
+        else:
+            self._vector_store.delete_by_document(document_id)
+            logger.info("Deleted Qdrant data for document: %s", document_id)
 
 
-def create_pipeline(config: RagConfig) -> RAGPipeline:
-    return RAGPipeline(config)
+def create_pipeline(
+    config: VectorRagConfig | GraphRagConfig,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> RAGPipeline:
+    return RAGPipeline(config, rag_mode=rag_mode)
 
 
-def get_rag_pipeline(config: RagConfig | None = None) -> RAGPipeline:
+def get_rag_pipeline(
+    config: VectorRagConfig | GraphRagConfig | None = None,
+    rag_mode: RagMode = RagMode.VECTOR,
+) -> RAGPipeline:
     """Build pipeline from config or deployment defaults."""
-    from app.schemas.rag_config import RagConfig as RC
+    from app.schemas.rag_config import VectorRagConfig as VC
 
-    return create_pipeline(config or RC.from_settings())
+    return create_pipeline(config or VC.from_settings(), rag_mode=rag_mode)

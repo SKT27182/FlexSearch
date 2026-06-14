@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import get_current_active_user
 from app.db.models import RagMode, User
-from app.schemas.rag_config import RagConfig
+from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -18,37 +18,73 @@ GRAPH_RETRIEVAL = ["graph_local", "graph_global"]
 async def get_rag_options(
     _: Annotated[User, Depends(get_current_active_user)],
     rag_mode: Literal["vector", "graph"] | None = Query(default=None),
+    graph_backend: Literal["neo4j", "microsoft"] | None = Query(default=None),
 ) -> dict:
     mode = rag_mode or "vector"
-    if mode == "graph":
-        defaults = RagConfig.for_mode(RagMode.GRAPH)
-        retrieval_strategies = GRAPH_RETRIEVAL
-        retrieval_params = {
-            "graph_local": {"community_level": 2, "max_context_tokens": 12000},
-            "graph_global": {
-                "community_level": 2,
-                "dynamic_community_selection": False,
-                "max_context_tokens": 12000,
+    backend = graph_backend or "neo4j"
+
+    if mode == "graph" and backend == "microsoft":
+        defaults = GraphRagConfig.from_settings(graph_backend="microsoft")
+        return {
+            "rag_mode": "graph",
+            "graph_backend": "microsoft",
+            "defaults": defaults.model_dump(mode="json"),
+            "extraction_strategies": ["ocr", "vlm"],
+            "retrieval_strategies": GRAPH_RETRIEVAL,
+            "chunking_strategies": [],
+            "reranking_strategies": ["none"],
+            "graph_indexing": {
+                "enabled": True,
+                "method": ["standard", "nlp"],
+                "community_level": {"min": 0, "max": 4, "default": 2},
+            },
+            "retrieval_params": {
+                "graph_local": {"community_level": 2, "max_context_tokens": 12000},
+                "graph_global": {
+                    "community_level": 2,
+                    "dynamic_community_selection": False,
+                    "max_context_tokens": 12000,
+                },
             },
         }
-        chunking_strategies: list[str] = []
-        chunking_params: dict = {}
-    else:
-        defaults = RagConfig.from_settings()
-        retrieval_strategies = VECTOR_RETRIEVAL
-        retrieval_params = {
-            "dense": {"score_threshold": None},
-            "bm25": {"k1": 1.5, "b": 0.75},
-            "hybrid": {"rrf_k": 60},
-            "parent_child": {},
+
+    if mode == "graph":
+        defaults = GraphRagConfig.from_settings(graph_backend="neo4j")
+        return {
+            "rag_mode": "graph",
+            "graph_backend": "neo4j",
+            "defaults": defaults.model_dump(mode="json"),
+            "extraction_strategies": ["ocr", "vlm"],
+            "retrieval_strategies": GRAPH_RETRIEVAL,
+            "chunking_strategies": [],
+            "reranking_strategies": ["none"],
+            "indexing_params": {
+                "max_entities_per_passage": 20,
+                "embed_entities": True,
+            },
+            "extraction_params": {
+                "passage_chunk_size": 800,
+            },
+            "retrieval_params": {
+                "graph_local": {"max_hops": 2, "top_entities": 10},
+                "graph_global": {"top_passages": 5},
+            },
         }
-        chunking_strategies = [
+
+    defaults = VectorRagConfig.from_settings()
+    return {
+        "rag_mode": "vector",
+        "defaults": defaults.model_dump(mode="json"),
+        "extraction_strategies": ["ocr", "vlm"],
+        "chunking_strategies": [
             "fixed_window",
             "recursive",
             "semantic",
             "parent_child",
-        ]
-        chunking_params = {
+        ],
+        "retrieval_strategies": VECTOR_RETRIEVAL,
+        "reranking_strategies": ["none", "cross_encoder"],
+        "chunking_params": {
             "fixed_window": {"chunk_size": 512, "overlap": 50},
             "recursive": {"chunk_size": 512, "overlap": 50},
             "semantic": {
@@ -61,20 +97,11 @@ async def get_rag_options(
                 "child_chunk_size": 300,
                 "overlap": 50,
             },
-        }
-
-    return {
-        "rag_mode": mode,
-        "defaults": defaults.model_dump(mode="json"),
-        "extraction_strategies": ["ocr", "vlm"],
-        "chunking_strategies": chunking_strategies,
-        "retrieval_strategies": retrieval_strategies,
-        "reranking_strategies": ["none", "cross_encoder"],
-        "graph_indexing": {
-            "enabled": True,
-            "method": ["standard", "nlp"],
-            "community_level": {"min": 0, "max": 4, "default": 2},
         },
-        "chunking_params": chunking_params,
-        "retrieval_params": retrieval_params,
+        "retrieval_params": {
+            "dense": {"score_threshold": None},
+            "bm25": {"k1": 1.5, "b": 0.75},
+            "hybrid": {"rrf_k": 60},
+            "parent_child": {},
+        },
     }

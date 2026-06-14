@@ -5,6 +5,8 @@ from app.rag.retrieval.dense import DenseRetrieval
 from app.rag.retrieval.graph_global import GraphGlobalRetrieval
 from app.rag.retrieval.graph_local import GraphLocalRetrieval
 from app.rag.retrieval.parent_child import ParentChildRetrieval
+from app.rag.retrieval.graph_global import GraphGlobalRetrieval
+from app.rag.retrieval.graph_local import GraphLocalRetrieval
 from app.rag.retrieval.hybrid import HybridRetrieval
 from app.rag.retrieval.sparse import SparseRetrieval
 
@@ -17,4 +19,6 @@ __all__ = [
     "ParentChildRetrieval",
     "HybridRetrieval",
     "SparseRetrieval",
+    "GraphLocalRetrieval",
+    "GraphGlobalRetrieval",
 ]

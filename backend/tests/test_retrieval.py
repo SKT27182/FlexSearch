@@ -69,8 +69,8 @@ class TestRetrievalQuery:
                 return results[:top_k], "dense", "none"
 
         monkeypatch.setattr(
-            "app.api.retrieval.get_rag_pipeline",
-            lambda config=None: FakePipeline(),
+            "app.api.retrieval.create_pipeline",
+            lambda config=None, rag_mode=None: FakePipeline(),
         )
 
         response = await async_client.post(
@@ -150,7 +150,9 @@ class TestRetrievalQuery:
         project_id = project_response.json()["id"]
         project = await db_session.get(Project, UUID(project_id))
         assert project is not None
-        project.graph_index = GraphIndexState(status="ready").to_db()
+        project.graph_index_status = GraphIndexState(
+            backend="microsoft", status="ready"
+        ).to_db()
         await db_session.commit()
 
         response = await async_client.post(

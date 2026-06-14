@@ -12,7 +12,7 @@ class Neo4jGraphGlobalRetrieval(BaseRetrievalStrategy):
     """Thematic retrieval via passage fulltext search."""
 
     def __init__(self, config: GraphRetrievalConfig) -> None:
-        self._params = config.resolved_params()
+        self._params = config.resolved_params(graph_backend="neo4j")
         if not isinstance(self._params, GraphGlobalRetrievalParams):
             self._params = GraphGlobalRetrievalParams.model_validate(config.params)
         self._store = get_neo4j_store()

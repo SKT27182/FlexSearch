@@ -10,7 +10,10 @@ from app.rag.retrieval.graph_global_microsoft import (
     build_microsoft_graph_global,
 )
 from app.rag.retrieval.graph_global_neo4j import Neo4jGraphGlobalRetrieval
-from app.schemas.rag_config import GraphGlobalRetrievalParams, GraphRetrievalConfig
+from app.schemas.rag_config import (
+    GraphRetrievalConfig,
+    MicrosoftGraphGlobalRetrievalParams,
+)
 
 GraphBackend = Literal["neo4j", "microsoft"]
 
@@ -22,7 +25,7 @@ class GraphGlobalRetrieval(BaseRetrievalStrategy):
         self,
         *,
         graph_backend: GraphBackend,
-        microsoft_params: GraphGlobalRetrievalParams | None = None,
+        microsoft_params: MicrosoftGraphGlobalRetrievalParams | None = None,
         neo4j_config: GraphRetrievalConfig | None = None,
     ) -> None:
         self._graph_backend = graph_backend
@@ -31,7 +34,7 @@ class GraphGlobalRetrieval(BaseRetrievalStrategy):
                 neo4j_config or GraphRetrievalConfig(strategy="graph_global")
             )
         else:
-            params = microsoft_params or GraphGlobalRetrievalParams()
+            params = microsoft_params or MicrosoftGraphGlobalRetrievalParams()
             self._delegate = build_microsoft_graph_global(params)
 
     @property

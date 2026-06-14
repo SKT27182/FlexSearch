@@ -215,7 +215,27 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
-    # LLM (via LiteLLM) - used only for VLM extraction strategy
+    # NEO4J (Graph RAG; provisioned in infra-hub)
+    # =========================================================================
+    neo4j_uri: str = Field(
+        default="bolt://localhost:7687",
+        description="Neo4j Bolt URI",
+    )
+    neo4j_user: str = Field(
+        default="neo4j",
+        description="Neo4j username",
+    )
+    neo4j_password: str = Field(
+        default="password",
+        description="Neo4j password",
+    )
+    neo4j_http_port: int = Field(
+        default=7474,
+        description="Neo4j Browser HTTP port (infra-hub admin)",
+    )
+
+    # =========================================================================
+    # LLM (via LiteLLM) - VLM extraction and Graph RAG entity extraction
     # =========================================================================
     model_name: str = Field(
         default="gpt-4o-mini",

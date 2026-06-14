@@ -200,7 +200,7 @@ export function ProjectDetailPage() {
   const handleQuery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || !id) return;
-    if (isGraphMode(project?.rag_mode) && project?.graph_index.status !== 'ready') {
+    if (isGraphMode(project?.rag_mode) && project?.graph_index_status?.status !== 'ready') {
       alert('Graph index is not ready yet. Wait for indexing to complete.');
       return;
     }
@@ -271,7 +271,7 @@ export function ProjectDetailPage() {
   };
 
   const isGraphProject = isGraphMode(project?.rag_mode);
-  const graphReady = project?.graph_index.status === 'ready';
+  const graphReady = project?.graph_index_status?.status === 'ready';
 
   if (isLoading) {
     return (
@@ -313,11 +313,11 @@ export function ProjectDetailPage() {
                 · graph index:{' '}
                 <span
                   className={cn(
-                    project.graph_index.status === 'ready' && 'text-emerald-600',
-                    project.graph_index.status === 'failed' && 'text-destructive'
+                    project.graph_index_status?.status === 'ready' && 'text-emerald-600',
+                    project.graph_index_status?.status === 'failed' && 'text-destructive'
                   )}
                 >
-                  {project.graph_index.status}
+                  {project.graph_index_status?.status}
                 </span>
               </>
             )}
@@ -520,10 +520,10 @@ export function ProjectDetailPage() {
                 <CardContent className="space-y-3 text-sm">
                   <p className="text-muted-foreground">
                     Download parquet + GraphML, then open in an external tool. Graph index:{' '}
-                    <strong>{project.graph_index.status}</strong>
-                    {project.graph_index.error && (
+                    <strong>{project.graph_index_status?.status}</strong>
+                    {project.graph_index_status?.error && (
                       <span className="text-destructive block mt-1">
-                        {project.graph_index.error}
+                        {project.graph_index_status?.error}
                       </span>
                     )}
                   </p>

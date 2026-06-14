@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.rag.retrieval.graph_context_mapper import context_to_retrieval_results
-from app.schemas.rag_config import GraphGlobalRetrievalParams
+from app.schemas.rag_config import MicrosoftGraphGlobalRetrievalParams
 from app.services.graphrag_workspace import get_graphrag_workspace
 
 
@@ -42,7 +42,7 @@ class MicrosoftGraphGlobalRetrieval(BaseRetrievalStrategy):
 
 
 def build_microsoft_graph_global(
-    params: GraphGlobalRetrievalParams,
+    params: MicrosoftGraphGlobalRetrievalParams,
 ) -> MicrosoftGraphGlobalRetrieval:
     return MicrosoftGraphGlobalRetrieval(
         community_level=params.community_level,

@@ -28,7 +28,7 @@ class UserRole(str, enum.Enum):
 
 
 class RagMode(str, enum.Enum):
-    """Project RAG backend: classical vector store or Microsoft GraphRAG."""
+    """Mutually exclusive RAG pipeline mode per project."""
 
     VECTOR = "vector"
     GRAPH = "graph"
@@ -43,6 +43,7 @@ class DocumentStatus(str, enum.Enum):
     EXTRACTED = "extracted"
     CHUNKING = "chunking"
     INDEXING = "indexing"
+    GRAPH_INDEXING = "graph_indexing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -131,10 +132,9 @@ class Project(Base):
         default=RagMode.VECTOR,
         nullable=False,
     )
-    graph_index: Mapped[dict[str, Any]] = mapped_column(
+    graph_index_status: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
-        nullable=False,
-        default=dict,
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
