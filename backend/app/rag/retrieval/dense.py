@@ -4,7 +4,7 @@ FlexSearch Backend - Dense Retrieval Strategy
 Vector similarity search using Qdrant.
 """
 
-from app.rag.embedding import get_embedding_service
+from app.services.embedding import get_embedding_service
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.services.vector_store import get_vector_store
 from app.utils.logger import create_logger

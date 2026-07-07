@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { Menu, Loader2 } from 'lucide-react'
 import { useAuthStore, useProjectStore } from '@/stores'
@@ -11,8 +11,9 @@ const SIDEBAR_COLLAPSED_KEY = 'flexsearch-sidebar-collapsed'
 
 export function MainLayout() {
   const { user, isInitialized, isLoading, loadUser, logout } = useAuthStore()
-  const { fetchProjects } = useProjectStore()
+  const fetchProjects = useProjectStore((state) => state.fetchProjects)
   const location = useLocation()
+  const projectsFetchedForUser = useRef<string | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -42,10 +43,14 @@ export function MainLayout() {
   }, [loadUser])
 
   useEffect(() => {
-    if (isAuthenticated) {
-      fetchProjects()
+    if (!user?.id) {
+      projectsFetchedForUser.current = null
+      return
     }
-  }, [isAuthenticated, fetchProjects])
+    if (projectsFetchedForUser.current === user.id) return
+    projectsFetchedForUser.current = user.id
+    void fetchProjects()
+  }, [user?.id, fetchProjects])
 
   useEffect(() => {
     try {

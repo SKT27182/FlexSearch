@@ -3,7 +3,8 @@ import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2, Search, Ext
 import { Button, Input, Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { cn, formatRelativeTime, formatFileSize } from '@/lib/utils';
 import { adminApi, type AdminUserStats, type AdminSystemStats, type AdminDocument } from '@/lib/api';
-import { isInfraAdmin, canDeleteUser } from '@/lib/roles';
+import { isInfraAdmin, canDeleteUser, canAdministerUser } from '@/lib/roles';
+import { AdminUserProjectsDialog } from '@/components/AdminUserProjectsDialog';
 import { useAuthStore } from '@/stores';
 
 export function AdminPage() {
@@ -25,6 +26,8 @@ export function AdminPage() {
   // Document search/filter
   const [docSearch, setDocSearch] = useState('');
   const [actionError, setActionError] = useState('');
+  const [selectedUser, setSelectedUser] = useState<AdminUserStats | null>(null);
+  const [userProjectsOpen, setUserProjectsOpen] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -264,7 +267,9 @@ export function AdminPage() {
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
                 <CardTitle>User Accounts</CardTitle>
-                <p className="text-sm text-muted-foreground mt-1">Manage users and their permissions</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Manage users and permissions. Click a user you can administer to view their projects and documents.
+                </p>
               </div>
               <Button onClick={() => setShowCreateUser(!showCreateUser)}>
                 {showCreateUser ? 'Cancel' : (
@@ -349,18 +354,32 @@ export function AdminPage() {
                         const canEditRole =
                           canManageRoles && !isTargetInfra;
                         const canDelete = canDeleteUser(currentUser?.role, user.role);
+                        const canOpenProjects = canAdministerUser(currentUser?.role, user.role);
 
                         return (
-                        <tr key={user.user_id} className="hover:bg-secondary/30 transition-colors">
+                        <tr
+                          key={user.user_id}
+                          className={cn(
+                            'transition-colors',
+                            canOpenProjects && 'hover:bg-secondary/30 cursor-pointer'
+                          )}
+                          onClick={() => {
+                            if (!canOpenProjects) return;
+                            setSelectedUser(user);
+                            setUserProjectsOpen(true);
+                          }}
+                        >
                           <td className="p-4">
                             <div className="flex items-center gap-3">
                               <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center text-primary font-bold text-xs">
                                 {user.email[0].toUpperCase()}
                               </div>
-                              <span className="font-medium">{user.email}</span>
+                              <span className={cn('font-medium', canOpenProjects && 'underline-offset-2 hover:underline')}>
+                                {user.email}
+                              </span>
                             </div>
                           </td>
-                          <td className="p-4">
+                          <td className="p-4" onClick={(e) => e.stopPropagation()}>
                             {canEditRole ? (
                               <select
                                 value={user.role}
@@ -393,7 +412,7 @@ export function AdminPage() {
                           <td className="p-4 text-muted-foreground">
                             {formatRelativeTime(user.created_at)}
                           </td>
-                          <td className="p-4 text-right">
+                          <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
                             {canDelete && (
                               <Button
                                 variant="ghost"
@@ -414,6 +433,12 @@ export function AdminPage() {
               </div>
             </CardContent>
           </Card>
+          <AdminUserProjectsDialog
+            user={selectedUser}
+            open={userProjectsOpen}
+            onOpenChange={setUserProjectsOpen}
+            onChanged={loadData}
+          />
         </div>
       )}
 

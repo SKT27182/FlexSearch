@@ -30,8 +30,9 @@ import { RagConfigForm } from '@/components/RagConfigForm';
 import { DocumentPreviewDialog } from '@/components/DocumentPreviewDialog';
 import { UploadProgressList } from '@/components/UploadProgressList';
 import { subscribeProjectDocuments } from '@/hooks/useDocumentStatusStream';
-import { canPreview, isGraphMode, type DocumentStatusEvent, type RagConfig, type RagMode, type RetrievalOverrides } from '@/lib/rag-types';
-import { defaultRagConfigForMode } from '@/components/RagConfigForm';
+import { documentId, mergeDocumentsFromServer, processingDocuments, sortDocuments, upsertDocumentFromApi, upsertDocumentFromEvent } from '@/lib/document-state';
+import { canPreview, getGraphBackend, getProjectMode, isGraphMode, projectModeLabel, type DocumentStatusEvent, type ProjectMode, type RagConfig, type RetrievalOverrides } from '@/lib/rag-types';
+import { defaultRagConfigForMode, projectModeFromRag, projectModeToRagMode } from '@/components/RagConfigForm';
 
 const PROCESSING_STATUSES = new Set([
   'uploaded',
@@ -70,6 +71,19 @@ export function ProjectDetailPage() {
   const [sseActive, setSseActive] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wasProcessingRef = useRef(false);
+  const uploadRankRef = useRef<Map<string, number>>(new Map());
+  const uploadRankCounterRef = useRef(0);
+
+  const syncDocuments = useCallback(async () => {
+    if (!id) return;
+    try {
+      const docs = await documentsApi.list(id);
+      setDocuments((prev) => mergeDocumentsFromServer(prev, docs));
+    } catch (error) {
+      console.error('Failed to sync documents:', error);
+    }
+  }, [id]);
 
   const loadData = useCallback(async () => {
     if (!id) return;
@@ -81,7 +95,7 @@ export function ProjectDetailPage() {
       ]);
       setProject(proj);
       setRagDraft(proj.rag_config);
-      setDocuments(docs);
+      setDocuments(sortDocuments(docs));
       selectProject(proj);
     } catch (error) {
       console.error('Failed to load project:', error);
@@ -102,37 +116,7 @@ export function ProjectDetailPage() {
   const applyStatusEvent = useCallback(
     (ev: DocumentStatusEvent) => {
       if (!id) return;
-      setDocuments((prev) => {
-        const idx = prev.findIndex((d) => d.id === ev.document_id);
-        if (idx < 0) {
-          return [
-            ...prev,
-            {
-              id: ev.document_id,
-              filename: ev.filename ?? 'Document',
-              content_type: 'application/octet-stream',
-              size_bytes: 0,
-              status: ev.status,
-              processing_step: ev.processing_step,
-              progress_pct: ev.progress_pct,
-              chunk_count: ev.chunk_count,
-              project_id: id,
-              created_at: new Date().toISOString(),
-              error_message: ev.error_message,
-            },
-          ];
-        }
-        const next = [...prev];
-        next[idx] = {
-          ...next[idx],
-          status: ev.status,
-          processing_step: ev.processing_step,
-          progress_pct: ev.progress_pct,
-          chunk_count: ev.chunk_count,
-          error_message: ev.error_message ?? next[idx].error_message,
-        };
-        return next;
-      });
+      setDocuments((prev) => upsertDocumentFromEvent(prev, ev, id));
     },
     [id]
   );
@@ -143,21 +127,57 @@ export function ProjectDetailPage() {
       return;
     }
     setSseActive(true);
-    return subscribeProjectDocuments(id, applyStatusEvent);
-  }, [id, hasProcessing, applyStatusEvent]);
+    void syncDocuments();
+    return subscribeProjectDocuments(id, applyStatusEvent, syncDocuments);
+  }, [id, hasProcessing, applyStatusEvent, syncDocuments]);
+
+  useEffect(() => {
+    if (wasProcessingRef.current && !hasProcessing) {
+      void syncDocuments();
+    }
+    wasProcessingRef.current = hasProcessing;
+  }, [hasProcessing, syncDocuments]);
+
+  const shouldPollGraphIndex = useMemo(() => {
+    if (!project || !isGraphMode(project.rag_mode)) return false;
+    if (getGraphBackend(project.rag_config) !== 'microsoft') return false;
+    const status = project.graph_index_status?.status;
+    return status === 'pending' || status === 'indexing';
+  }, [project]);
+
+  useEffect(() => {
+    if (!id || !shouldPollGraphIndex) return;
+    const refreshGraphIndex = async () => {
+      try {
+        const status = await projectsApi.getGraphIndexStatus(id);
+        setProject((prev) => (prev ? { ...prev, graph_index_status: status } : prev));
+      } catch (error) {
+        console.error('Failed to refresh graph index status:', error);
+      }
+    };
+    void refreshGraphIndex();
+    const timer = setInterval(() => void refreshGraphIndex(), 3000);
+    return () => clearInterval(timer);
+  }, [id, shouldPollGraphIndex]);
 
   const processingDocs = useMemo(
-    () => documents.filter((d) => PROCESSING_STATUSES.has(d.status)),
+    () => processingDocuments(documents, PROCESSING_STATUSES, uploadRankRef.current),
     [documents]
   );
+
+  const sortedDocuments = useMemo(() => sortDocuments(documents), [documents]);
 
   const handleUpload = async (files: FileList | null) => {
     if (!files || !id) return;
     setIsUploading(true);
+    uploadRankRef.current = new Map();
+    uploadRankCounterRef.current = 0;
     try {
       for (const file of Array.from(files)) {
         const doc = await documentsApi.upload(id, file);
-        setDocuments((prev) => [doc, ...prev]);
+        uploadRankRef.current.set(documentId(doc.id), uploadRankCounterRef.current++);
+        setDocuments((prev) => upsertDocumentFromApi(prev, doc));
+        void syncDocuments();
       }
       setSseActive(true);
     } catch (error) {
@@ -200,7 +220,7 @@ export function ProjectDetailPage() {
   const handleQuery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || !id) return;
-    if (isGraphMode(project?.rag_mode) && project?.graph_index_status?.status !== 'ready') {
+    if (isGraphProject && !graphReady) {
       alert('Graph index is not ready yet. Wait for indexing to complete.');
       return;
     }
@@ -233,18 +253,27 @@ export function ProjectDetailPage() {
     return null;
   };
 
-  const handleSwitchMode = async (newMode: RagMode) => {
+  const handleSwitchMode = async (newMode: ProjectMode) => {
     if (!id || !project) return;
+    const currentMode = projectModeFromRag(project.rag_mode, project.rag_config);
+    if (newMode === currentMode) return;
     if (
       !confirm(
-        `Switch to ${newMode === 'graph' ? 'Graph RAG' : 'Traditional RAG'}? This wipes the current index and reprocesses all documents.`
+        `Switch to ${projectModeLabel(newMode)}? This wipes the current index and reprocesses all documents.`
       )
     ) {
       return;
     }
     setSwitchingMode(true);
     try {
-      await projectsApi.switchRagMode(id, newMode);
+      const ragMode = projectModeToRagMode(newMode);
+      const graphBackend =
+        newMode === 'graph_microsoft'
+          ? 'microsoft'
+          : newMode === 'graph_neo4j'
+            ? 'neo4j'
+            : undefined;
+      await projectsApi.switchRagMode(id, ragMode, graphBackend);
       await loadData();
     } finally {
       setSwitchingMode(false);
@@ -271,7 +300,19 @@ export function ProjectDetailPage() {
   };
 
   const isGraphProject = isGraphMode(project?.rag_mode);
-  const graphReady = project?.graph_index_status?.status === 'ready';
+  const currentProjectMode = project
+    ? projectModeFromRag(project.rag_mode, project.rag_config)
+    : 'vector';
+  const graphBackend = project ? getGraphBackend(project.rag_config) : null;
+  const isMicrosoftGraph = isGraphProject && graphBackend === 'microsoft';
+  const graphStatus = project?.graph_index_status;
+  const graphReady =
+    !isGraphProject ||
+    (isMicrosoftGraph
+      ? graphStatus?.status === 'ready'
+      : graphStatus?.status === 'ready' ||
+        (graphStatus?.entity_count ?? 0) > 0 ||
+        (graphStatus?.passage_count ?? 0) > 0);
 
   if (isLoading) {
     return (
@@ -305,7 +346,7 @@ export function ProjectDetailPage() {
           <h1 className="text-3xl font-bold">{project.name}</h1>
           <p className="text-muted-foreground">{project.description || 'No description'}</p>
           <p className="text-xs text-muted-foreground mt-1">
-            {isGraphProject ? 'Graph RAG' : 'Vector RAG'} ·{' '}
+            {projectModeLabel(getProjectMode(project.rag_mode, project.rag_config))} ·{' '}
             {project.rag_config.retrieval.strategy}
             {isGraphProject && (
               <>
@@ -313,12 +354,19 @@ export function ProjectDetailPage() {
                 · graph index:{' '}
                 <span
                   className={cn(
-                    project.graph_index_status?.status === 'ready' && 'text-emerald-600',
-                    project.graph_index_status?.status === 'failed' && 'text-destructive'
+                    graphReady && 'text-emerald-600',
+                    graphStatus?.status === 'failed' && 'text-destructive'
                   )}
                 >
-                  {project.graph_index_status?.status}
+                  {graphStatus?.status ?? 'pending'}
                 </span>
+                {!isMicrosoftGraph && graphStatus && (
+                  <>
+                    {' '}
+                    · {graphStatus.entity_count ?? 0} entities · {graphStatus.passage_count ?? 0}{' '}
+                    passages
+                  </>
+                )}
               </>
             )}
           </p>
@@ -343,6 +391,7 @@ export function ProjectDetailPage() {
               value={ragDraft}
               onChange={setRagDraft}
               ragMode={project.rag_mode}
+              graphBackend={graphBackend ?? undefined}
             />
             <div className="flex flex-wrap gap-2 items-center">
               <Button onClick={handleSaveRag} isLoading={savingRag}>
@@ -359,7 +408,7 @@ export function ProjectDetailPage() {
               >
                 Reprocess all (full)
               </Button>
-              {isGraphProject && (
+              {isMicrosoftGraph && (
                 <Button
                   variant="outline"
                   onClick={async () => {
@@ -371,11 +420,11 @@ export function ProjectDetailPage() {
                   Rebuild graph index
                 </Button>
               )}
-              <div className="ml-auto flex gap-2">
+              <div className="ml-auto flex flex-wrap gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={switchingMode || project.rag_mode === 'vector'}
+                  disabled={switchingMode || currentProjectMode === 'vector'}
                   onClick={() => handleSwitchMode('vector')}
                 >
                   Switch to Vector RAG
@@ -383,10 +432,18 @@ export function ProjectDetailPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={switchingMode || project.rag_mode === 'graph'}
-                  onClick={() => handleSwitchMode('graph')}
+                  disabled={switchingMode || currentProjectMode === 'graph_neo4j'}
+                  onClick={() => handleSwitchMode('graph_neo4j')}
                 >
-                  Switch to Graph RAG
+                  Switch to Graph RAG (Neo4j)
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={switchingMode || currentProjectMode === 'graph_microsoft'}
+                  onClick={() => handleSwitchMode('graph_microsoft')}
+                >
+                  Switch to Graph RAG (Microsoft)
                 </Button>
               </div>
             </div>
@@ -464,7 +521,7 @@ export function ProjectDetailPage() {
                   <p className="text-center py-8 text-sm text-muted-foreground">No documents yet</p>
                 ) : (
                   <div className="space-y-1">
-                    {documents.map((doc) => (
+                    {sortedDocuments.map((doc) => (
                       <div
                         key={doc.id}
                         className={cn(
@@ -509,21 +566,21 @@ export function ProjectDetailPage() {
         }
         main={
           <div className="space-y-8">
-            {isGraphProject && (
+            {isMicrosoftGraph && (
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Network className="h-5 w-5" />
-                    Visualize graph
+                    Visualize graph (Microsoft)
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
                   <p className="text-muted-foreground">
                     Download parquet + GraphML, then open in an external tool. Graph index:{' '}
-                    <strong>{project.graph_index_status?.status}</strong>
-                    {project.graph_index_status?.error && (
+                    <strong>{graphStatus?.status}</strong>
+                    {graphStatus?.error && (
                       <span className="text-destructive block mt-1">
-                        {project.graph_index_status?.error}
+                        {graphStatus.error}
                       </span>
                     )}
                   </p>
@@ -567,6 +624,16 @@ export function ProjectDetailPage() {
                 <CardTitle>Search Knowledge Base</CardTitle>
               </CardHeader>
               <CardContent>
+                {isGraphProject && !graphReady && (
+                  <p className="text-sm text-muted-foreground mb-3">
+                    Query is available once the graph index is ready.
+                    Current status: <strong>{graphStatus?.status ?? 'pending'}</strong>.
+                    {graphStatus?.status === 'indexing' && ' Indexing can take several minutes.'}
+                    {graphStatus?.error && (
+                      <span className="block text-destructive mt-1">{graphStatus.error}</span>
+                    )}
+                  </p>
+                )}
                 <form onSubmit={handleQuery} className="flex flex-wrap gap-2 mb-4 items-end">
                   <Input
                     placeholder="Ask something about your documents..."

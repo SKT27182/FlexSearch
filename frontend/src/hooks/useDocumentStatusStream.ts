@@ -1,9 +1,10 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import type { DocumentStatusEvent } from '@/lib/rag-types';
+import { documentId } from '@/lib/document-state';
 import { documentsApi } from '@/lib/api';
 
 const API_BASE = '/api';
-const POLL_MS = 2500;
+const POLL_MS = 2000;
 
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem('access_token');
@@ -40,17 +41,34 @@ function dispatchSseMessage(
     if (msg.event === 'error') {
       return true;
     }
+    const normalize = (raw: Record<string, unknown>): DocumentStatusEvent | null => {
+      const id = documentId(String(raw.document_id ?? raw.id ?? ''));
+      if (!id) return null;
+      return {
+        document_id: id,
+        project_id: String(raw.project_id ?? ''),
+        status: raw.status as DocumentStatusEvent['status'],
+        processing_step: (raw.processing_step as string | null) ?? null,
+        progress_pct: Number(raw.progress_pct ?? 0),
+        chunk_count: Number(raw.chunk_count ?? 0),
+        error_message: (raw.error_message as string | null) ?? null,
+        filename: raw.filename as string | undefined,
+      };
+    };
+
     if (msg.event === 'status' || msg.event === 'snapshot') {
-      onStatus(data as unknown as DocumentStatusEvent);
-      return isTerminal(String(data.status));
+      const ev = normalize(data);
+      if (!ev) return false;
+      onStatus(ev);
+      return false;
     }
     if (msg.event === 'snapshots' && Array.isArray(data.documents)) {
-      let anyTerminal = false;
-      for (const ev of data.documents as DocumentStatusEvent[]) {
+      for (const raw of data.documents as Record<string, unknown>[]) {
+        const ev = normalize(raw);
+        if (!ev) continue;
         onStatus(ev);
-        if (isTerminal(ev.status)) anyTerminal = true;
       }
-      return anyTerminal;
+      return false;
     }
     if (msg.event === 'close') {
       return true;
@@ -110,6 +128,7 @@ export function subscribeProjectDocuments(
 ): () => void {
   const ctrl = new AbortController();
   let pollCleanup: (() => void) | null = null;
+  let sseConnected = false;
 
   const startPolling = () => {
     if (pollCleanup) return;
@@ -118,7 +137,8 @@ export function subscribeProjectDocuments(
     });
   };
 
-  // Poll in parallel so UI updates even if SSE is buffered or Redis is down
+  // Poll all documents in parallel with SSE so batch uploads never miss updates
+  // for files that finish while others are still uploading.
   startPolling();
 
   void fetchEventSource(`${API_BASE}/projects/${projectId}/documents/events`, {
@@ -135,15 +155,13 @@ export function subscribeProjectDocuments(
         startPolling();
         throw new Error(`Unexpected content-type: ${ct}`);
       }
+      sseConnected = true;
     },
     onmessage: (msg) => {
-      const terminal = dispatchSseMessage(msg, onStatus);
-      if (terminal) {
-        onDone?.();
-      }
+      dispatchSseMessage(msg, onStatus);
     },
     onclose: () => {
-      startPolling();
+      if (!sseConnected) startPolling();
     },
     onerror: () => {
       startPolling();
@@ -153,7 +171,13 @@ export function subscribeProjectDocuments(
     startPolling();
   });
 
+  // Fallback polling if SSE never connects within a few seconds
+  const pollFallbackTimer = setTimeout(() => {
+    if (!sseConnected) startPolling();
+  }, 4000);
+
   return () => {
+    clearTimeout(pollFallbackTimer);
     ctrl.abort();
     pollCleanup?.();
     pollCleanup = null;

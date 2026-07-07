@@ -105,6 +105,23 @@ async def _handle_graph_after_extract(
 ) -> None:
     if _is_microsoft_graph(rag_config):
         await _complete_graph_document(db, document)
+        # Microsoft GraphRAG indexes the whole project at once, so wait until
+        # every document in the project has reached a terminal state before
+        # scheduling a rebuild. Otherwise each finished doc kicks off a build
+        # and they overlap (the debounce cancel does not stop an in-flight
+        # worker). Only the last document to finish triggers a single rebuild.
+        pending = await _count_non_terminal_documents(db, project.id)
+        if pending:
+            logger.info(
+                "Graph rebuild deferred for project %s: %d document(s) still processing",
+                project.id,
+                pending,
+            )
+            return
+        logger.info(
+            "All documents ready for project %s; scheduling graph rebuild",
+            project.id,
+        )
         schedule_graph_index_rebuild(project.id)
         return
     await _run_graph_index(
@@ -117,6 +134,24 @@ async def _handle_graph_after_extract(
         text,
         page_count,
     )
+
+
+async def _count_non_terminal_documents(
+    db: AsyncSession, project_id: UUID
+) -> int:
+    """Count documents not yet COMPLETED or FAILED (still being processed)."""
+    from sqlalchemy import func
+
+    terminal = (DocumentStatus.COMPLETED, DocumentStatus.FAILED)
+    result = await db.execute(
+        select(func.count())
+        .select_from(Document)
+        .where(
+            Document.project_id == project_id,
+            Document.status.notin_(terminal),
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def process_document(

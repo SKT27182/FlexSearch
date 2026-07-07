@@ -11,7 +11,7 @@ from uuid import NAMESPACE_DNS, uuid5
 
 from app.db.models import RagMode
 from app.rag.chunking.base import Chunk
-from app.rag.embedding import get_embedding_service
+from app.services.embedding import get_embedding_service
 from app.rag.factory import (
     build_chunking_strategy,
     build_extraction_strategy,

@@ -1,24 +1,40 @@
 import { useState } from 'react';
-import { RagConfigForm, defaultRagConfigForMode } from '@/components/RagConfigForm';
-import type { RagConfig, RagMode } from '@/lib/rag-types';
+import {
+  RagConfigForm,
+  projectModeToRagMode,
+} from '@/components/RagConfigForm';
+import type { ProjectMode, RagConfig } from '@/lib/rag-types';
+import {
+  defaultConfigForProjectMode,
+  getProjectMode,
+  projectModeLabel,
+} from '@/lib/rag-types';
 import { Link } from 'react-router-dom';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
 import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, buttonVariants } from '@/components/ui';
 import { formatRelativeTime, cn } from '@/lib/utils';
 
+const PROJECT_MODE_HELP: Record<ProjectMode, string> = {
+  vector: 'Classic chunk + embed + vector search via Qdrant.',
+  graph_neo4j:
+    'Per-document entity extraction into Neo4j. Good for local, incremental graph indexing.',
+  graph_microsoft:
+    'Microsoft GraphRAG with community reports. Batch rebuild; indexing uses your LLM and may be costly.',
+};
+
 export function ProjectsPage() {
-  const { projects, isLoading, createProject, deleteProject } = useProjectStore();
+  const { projects, isLoading, error, createProject, deleteProject } = useProjectStore();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [creating, setCreating] = useState(false);
-  const [ragMode, setRagMode] = useState<RagMode>('vector');
-  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultRagConfigForMode('vector'));
+  const [projectMode, setProjectMode] = useState<ProjectMode>('vector');
+  const [ragConfig, setRagConfig] = useState<RagConfig>(defaultConfigForProjectMode('vector'));
 
-  const handleRagModeChange = (mode: RagMode) => {
-    setRagMode(mode);
-    setRagConfig(defaultRagConfigForMode(mode));
+  const handleProjectModeChange = (mode: ProjectMode) => {
+    setProjectMode(mode);
+    setRagConfig(defaultConfigForProjectMode(mode));
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -27,12 +43,20 @@ export function ProjectsPage() {
 
     setCreating(true);
     try {
-      await createProject(newName.trim(), newDescription.trim() || undefined, ragConfig, ragMode);
+      await createProject(
+        newName.trim(),
+        newDescription.trim() || undefined,
+        ragConfig,
+        projectModeToRagMode(projectMode)
+      );
       setNewName('');
       setNewDescription('');
-      setRagMode('vector');
-      setRagConfig(defaultRagConfigForMode('vector'));
+      setProjectMode('vector');
+      setRagConfig(defaultConfigForProjectMode('vector'));
       setShowCreate(false);
+    } catch (err) {
+      console.error('Create project failed:', err);
+      alert('Failed to create project. Check the console for details.');
     } finally {
       setCreating(false);
     }
@@ -40,9 +64,22 @@ export function ProjectsPage() {
 
   const handleDelete = async (id: string, name: string) => {
     if (confirm(`Delete project "${name}"? This cannot be undone.`)) {
-      await deleteProject(id);
+      try {
+        await deleteProject(id);
+      } catch (err) {
+        console.error('Delete project failed:', err);
+        alert('Failed to delete project.');
+      }
     }
   };
+
+  const ragMode = projectModeToRagMode(projectMode);
+  const graphBackend =
+    projectMode === 'graph_microsoft'
+      ? 'microsoft'
+      : projectMode === 'graph_neo4j'
+        ? 'neo4j'
+        : undefined;
 
   return (
     <div className="p-8 animate-fade-in">
@@ -94,19 +131,22 @@ export function ProjectsPage() {
                 <label className="text-sm font-medium">RAG mode</label>
                 <select
                   className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  value={ragMode}
-                  onChange={(e) => handleRagModeChange(e.target.value as RagMode)}
+                  value={projectMode}
+                  onChange={(e) => handleProjectModeChange(e.target.value as ProjectMode)}
                 >
                   <option value="vector">Traditional RAG (Qdrant vectors)</option>
-                  <option value="graph">Graph RAG (Microsoft GraphRAG)</option>
+                  <option value="graph_neo4j">Graph RAG (Neo4j)</option>
+                  <option value="graph_microsoft">Graph RAG (Microsoft GraphRAG)</option>
                 </select>
-                <p className="text-xs text-muted-foreground">
-                  {ragMode === 'graph'
-                    ? 'Builds a knowledge graph with community reports. Indexing uses your LLM and may be costly.'
-                    : 'Classic chunk + embed + vector search via Qdrant.'}
-                </p>
+                <p className="text-xs text-muted-foreground">{PROJECT_MODE_HELP[projectMode]}</p>
               </div>
-              <RagConfigForm value={ragConfig} onChange={setRagConfig} compact ragMode={ragMode} />
+              <RagConfigForm
+                value={ragConfig}
+                onChange={setRagConfig}
+                compact
+                ragMode={ragMode}
+                graphBackend={graphBackend}
+              />
             </CardContent>
             <CardFooter className="flex gap-3">
               <Button type="submit" isLoading={creating}>
@@ -121,7 +161,12 @@ export function ProjectsPage() {
       )}
 
       {/* Projects Grid */}
-      {isLoading ? (
+      {error && (
+        <div className="mb-6 rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          Could not refresh projects: {error}. Showing cached results when available.
+        </div>
+      )}
+      {isLoading && projects.length === 0 ? (
         <div className="flex items-center justify-center py-20">
           <div className="animate-spin rounded-full h-8 w-8 border-2 border-primary border-t-transparent" />
         </div>
@@ -151,7 +196,7 @@ export function ProjectsPage() {
                       <CardTitle className="text-lg">{project.name}</CardTitle>
                       <CardDescription className="text-xs">
                         Created {formatRelativeTime(project.created_at)} ·{' '}
-                        {project.rag_mode === 'graph' ? 'Graph RAG' : 'Vector RAG'}
+                        {projectModeLabel(getProjectMode(project.rag_mode, project.rag_config))}
                       </CardDescription>
                     </div>
                   </div>

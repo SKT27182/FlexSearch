@@ -13,6 +13,8 @@ BACKEND_LOG := $(LOG_DIR)/backend.log
 FRONTEND_LOG := $(LOG_DIR)/frontend.log
 BACKEND_PID := $(LOG_DIR)/backend.pid
 FRONTEND_PID := $(LOG_DIR)/frontend.pid
+# DEV_LOG_MODE: file | console | both (default)
+DEV_LOG_MODE ?= both
 BACKEND_ENV_FILE := $(if $(wildcard backend/.env),backend/.env,backend/.env.example)
 FRONTEND_ENV_FILE := $(if $(wildcard frontend/.env),frontend/.env,frontend/.env.example)
 APP_HOST_RAW := $(shell awk -F= '/^SERVICE_PUBLIC_HOST=/{gsub(/^[ \t]+|[ \t]+$$/,"",$$2); print $$2; exit}' $(BACKEND_ENV_FILE) 2>/dev/null)
@@ -35,22 +37,39 @@ install: ## Install backend (uv sync) and frontend (pnpm install) dependencies
 
 prepare-logs:
 	@mkdir -p "$(LOG_DIR)"
-	@: > "$(BACKEND_LOG)"
-	@: > "$(FRONTEND_LOG)"
+	@if [ "$(DEV_LOG_MODE)" != "console" ]; then \
+		: > "$(BACKEND_LOG)"; \
+		: > "$(FRONTEND_LOG)"; \
+	fi
 
-dev-local: install prepare-logs ## Run backend + frontend locally (no Docker), with log files
+dev-local: install prepare-logs ## Run backend + frontend locally (DEV_LOG_MODE=file|console|both)
 	@$(MAKE) --no-print-directory stop-local
 	@$(MAKE) --no-print-directory wait-db
-	@echo "backend log:  $(BACKEND_LOG)"
-	@echo "frontend log: $(FRONTEND_LOG)"
+	@echo "log mode: $(DEV_LOG_MODE)"
+	@if [ "$(DEV_LOG_MODE)" != "console" ]; then \
+		echo "backend log:  $(BACKEND_LOG)"; \
+		echo "frontend log: $(FRONTEND_LOG)"; \
+	fi
 	@$(MAKE) --no-print-directory print-urls
 	@bash -c 'set -euo pipefail; \
+		log_mode="$(DEV_LOG_MODE)"; \
+		case "$$log_mode" in file|console|both) ;; \
+			*) echo "Invalid DEV_LOG_MODE: $$log_mode (use file, console, or both)" >&2; exit 1 ;; \
+		esac; \
+		setup_log_pipe() { \
+			local logfile="$$1"; \
+			case "$$log_mode" in \
+				console) ;; \
+				both) exec > >(tee -a "$$logfile") 2>&1 ;; \
+				file|*) exec >> "$$logfile" 2>&1 ;; \
+			esac; \
+		}; \
 		trap '"'"'kill $$backend_pid $$frontend_pid 2>/dev/null || true; rm -f "$(BACKEND_PID)" "$(FRONTEND_PID)"'"'"' INT TERM EXIT; \
-		( set -a; [ -f backend/.env ] && source backend/.env; set +a; \
+		( setup_log_pipe "$(BACKEND_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
 		  PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
 		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-$(BACKEND_PORT)}" --app-dir backend \
-		) >> "$(BACKEND_LOG)" 2>&1 & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
-		( cd frontend && pnpm run dev ) >> "$(FRONTEND_LOG)" 2>&1 & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
+		) & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
+		( setup_log_pipe "$(FRONTEND_LOG)"; cd frontend && pnpm run dev ) & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
 		wait $$backend_pid $$frontend_pid'
 
 up: ## Start app containers in Docker
@@ -67,6 +86,12 @@ stop-local: ## Stop locally started backend/frontend processes from pid files
 		if [ -n "$$pids" ]; then \
 			echo "Stopping processes on port $$port: $$pids"; \
 			kill $$pids 2>/dev/null || true; \
+			sleep 1; \
+			pids="$$(ss -ltnp | awk -v p=":$$port$$" '$$4 ~ p {print}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"; \
+			if [ -n "$$pids" ]; then \
+				echo "Force stopping processes on port $$port: $$pids"; \
+				kill -9 $$pids 2>/dev/null || true; \
+			fi; \
 		fi; \
 	done
 

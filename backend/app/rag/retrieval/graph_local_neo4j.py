@@ -1,6 +1,6 @@
 """Graph-local retrieval: entity match + hop expansion."""
 
-from app.rag.embedding import get_embedding_service
+from app.services.embedding import get_embedding_service
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
 from app.schemas.rag_config import GraphLocalRetrievalParams, GraphRetrievalConfig
 from app.services.neo4j_store import get_neo4j_store

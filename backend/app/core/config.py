@@ -12,6 +12,8 @@ from urllib.parse import quote_plus, urlparse
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.services.model_ids import is_local_embedding_model
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -132,65 +134,6 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
-    # AUTHENTICATION
-    # =========================================================================
-    jwt_secret: str = Field(
-        description="JWT signing secret",
-    )
-    jwt_algorithm: str = Field(
-        default="HS256",
-        description="JWT signing algorithm",
-    )
-    jwt_expire_minutes: int = Field(
-        default=60,
-        description="JWT token expiration in minutes",
-    )
-
-    # =========================================================================
-    # EMBEDDING
-    # =========================================================================
-    embedding_model: str = Field(
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        description="Sentence transformer model for embeddings",
-    )
-
-    # =========================================================================
-    # RAG STRATEGIES
-    # =========================================================================
-    extraction_strategy: Literal["ocr", "vlm"] = Field(
-        default="ocr",
-        description="Document extraction strategy",
-    )
-    chunking_strategy: Literal[
-        "fixed_window", "recursive", "semantic", "parent_child"
-    ] = Field(
-        default="fixed_window",
-        description="Text chunking strategy",
-    )
-    retrieval_strategy: Literal["dense", "parent_child", "hybrid", "bm25"] = Field(
-        default="dense",
-        description="Retrieval strategy",
-    )
-    reranking_strategy: Literal["none", "cross_encoder"] = Field(
-        default="none",
-        description="Reranking strategy",
-    )
-
-    # =========================================================================
-    # GRAPH RAG (Microsoft GraphRAG)
-    # =========================================================================
-    graph_indexing_enabled: bool = Field(
-        default=True,
-        description="Global kill switch for GraphRAG indexing jobs",
-    )
-    graphrag_community_level: int = Field(
-        default=2,
-        ge=0,
-        le=4,
-        description="Default GraphRAG community level for indexing and search",
-    )
-
-    # =========================================================================
     # REDIS (document status pub/sub + SSE; align with infra-hub backend/.env)
     # =========================================================================
     redis_host: str = Field(
@@ -235,8 +178,27 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
+    # AUTHENTICATION
+    # =========================================================================
+    jwt_secret: str = Field(
+        description="JWT signing secret",
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm",
+    )
+    jwt_expire_minutes: int = Field(
+        default=60,
+        description="JWT token expiration in minutes",
+    )
+
+    # =========================================================================
     # LLM (via LiteLLM) - VLM extraction and Graph RAG entity extraction
     # =========================================================================
+    llm_api_base: str = Field(
+        default="",
+        description="LiteLLM base URL/proxy for MODEL_NAME (blank = provider default)",
+    )
     model_name: str = Field(
         default="gpt-4o-mini",
         description="LLM model name (LiteLLM format)",
@@ -244,6 +206,105 @@ class Settings(BaseSettings):
     api_key: str = Field(
         default="",
         description="LLM API key",
+    )
+
+    # =========================================================================
+    # EMBEDDING (vector RAG via LiteLLM API or local sentence-transformers)
+    # =========================================================================
+    embedding_api_base: str = Field(
+        default="",
+        description="LiteLLM base URL for EMBEDDING_MODEL API calls",
+    )
+    embedding_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        description=(
+            "Embedding model for vector RAG. Use sentence-transformers/... for local "
+            "models or a LiteLLM id (e.g. openai/text-embedding-3-small)."
+        ),
+    )
+    embedding_api_key: str = Field(
+        default="",
+        description="API key for LiteLLM embedding models (defaults to API_KEY)",
+    )
+
+    # =========================================================================
+    # RAG STRATEGIES
+    # =========================================================================
+    extraction_strategy: Literal["ocr", "vlm"] = Field(
+        default="ocr",
+        description="Document extraction strategy",
+    )
+    chunking_strategy: Literal[
+        "fixed_window", "recursive", "semantic", "parent_child"
+    ] = Field(
+        default="fixed_window",
+        description="Text chunking strategy",
+    )
+    retrieval_strategy: Literal["dense", "parent_child", "hybrid", "bm25"] = Field(
+        default="dense",
+        description="Retrieval strategy",
+    )
+    reranking_strategy: Literal["none", "cross_encoder"] = Field(
+        default="none",
+        description="Reranking strategy",
+    )
+
+    # =========================================================================
+    # GRAPH RAG (Microsoft GraphRAG)
+    # =========================================================================
+    graph_indexing_enabled: bool = Field(
+        default=True,
+        description="Global kill switch for GraphRAG indexing jobs",
+    )
+    graphrag_community_level: int = Field(
+        default=2,
+        ge=0,
+        le=4,
+        description="Default GraphRAG community level for indexing and search",
+    )
+    graphrag_embedding_api_base: str = Field(
+        default="",
+        description=(
+            "LiteLLM base URL for GraphRAG embeddings (defaults to EMBEDDING_API_BASE)"
+        ),
+    )
+    graphrag_embedding_model: str = Field(
+        default="openai/text-embedding-3-small",
+        description=(
+            "LiteLLM embedding model for Microsoft GraphRAG indexing "
+            "(API-only; separate from MODEL_NAME and EMBEDDING_MODEL)"
+        ),
+    )
+    graphrag_embedding_api_key: str = Field(
+        default="",
+        description=(
+            "API key for GraphRAG embedding model (defaults to EMBEDDING_API_KEY "
+            "then API_KEY; separate from vector embedding when set)"
+        ),
+    )
+    graphrag_concurrent_requests: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Max parallel LLM calls during Microsoft GraphRAG indexing",
+    )
+    graphrag_rate_limit_max_retries: int = Field(
+        default=30,
+        ge=1,
+        le=200,
+        description="How many times to sleep-and-retry after HTTP 429 during GraphRAG",
+    )
+    graphrag_rate_limit_default_wait_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=600.0,
+        description="Fallback wait when a 429 response has no Retry-After header",
+    )
+    graphrag_rate_limit_max_wait_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        description="Cap on Retry-After sleep duration for GraphRAG rate limits",
     )
 
     # =========================================================================
@@ -287,6 +348,19 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level",
     )
+
+    @model_validator(mode="after")
+    def apply_blank_env_defaults(self) -> "Settings":
+        """Treat blank .env values as unset so Field defaults apply."""
+        if not self.graphrag_embedding_model.strip():
+            self.graphrag_embedding_model = "openai/text-embedding-3-small"
+        if (
+            not self.embedding_api_key.strip()
+            and not self.api_key.strip()
+            and not is_local_embedding_model(self.embedding_model)
+        ):
+            self.embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+        return self
 
     @model_validator(mode="after")
     def apply_public_app_settings(self) -> "Settings":

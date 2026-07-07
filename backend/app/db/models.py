@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, TypeDecorator, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,42 @@ class RagMode(str, enum.Enum):
 
     VECTOR = "vector"
     GRAPH = "graph"
+
+
+
+class StrEnumType(TypeDecorator):
+    """Persist str enums by value; tolerate legacy rows stored as enum names."""
+
+    impl = String
+    cache_ok = True
+
+    def __init__(self, enum_cls: type[enum.Enum], *, length: int) -> None:
+        super().__init__(length)
+        self.enum_cls = enum_cls
+        self._by_value = {member.value: member for member in enum_cls}
+        self._by_name = {member.name: member for member in enum_cls}
+
+    def process_bind_param(self, value: enum.Enum | str | None, dialect) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, self.enum_cls):
+            return value.value
+        text = str(value)
+        if text in self._by_name:
+            return self._by_name[text].value
+        return text.lower()
+
+    def process_result_value(self, value: str | None, dialect) -> enum.Enum | None:
+        if value is None:
+            return None
+        if value in self._by_value:
+            return self._by_value[value]
+        if value in self._by_name:
+            return self._by_name[value]
+        lowered = value.lower()
+        if lowered in self._by_value:
+            return self._by_value[lowered]
+        raise LookupError(f"{value!r} is not a valid {self.enum_cls.__name__}")
 
 
 class DocumentStatus(str, enum.Enum):
@@ -128,7 +164,7 @@ class Project(Base):
         default=dict,
     )
     rag_mode: Mapped[RagMode] = mapped_column(
-        Enum(RagMode, native_enum=False, length=16),
+        StrEnumType(RagMode, length=16),
         default=RagMode.VECTOR,
         nullable=False,
     )
@@ -192,7 +228,7 @@ class Document(Base):
         nullable=False,
     )
     status: Mapped[DocumentStatus] = mapped_column(
-        Enum(DocumentStatus, native_enum=False, length=32),
+        StrEnumType(DocumentStatus, length=32),
         default=DocumentStatus.UPLOADED,
         nullable=False,
     )

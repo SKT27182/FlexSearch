@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import NAMESPACE_DNS, uuid5
 
-from app.rag.embedding import get_embedding_service
+from app.services.embedding import get_embedding_service
 from app.rag.graph.extractor import GraphExtractor
 from app.schemas.rag_config import GraphRagConfig
 from app.services.neo4j_store import (

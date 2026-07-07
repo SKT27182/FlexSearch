@@ -8,16 +8,12 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-import litellm
 from litellm import acompletion
 
-from app.core.config import settings
+from app.services.litellm_config import configure_litellm, llm_endpoint
 from app.utils.logger import create_logger
 
-logger = create_logger(__name__, level=settings.log_level)
-
-# Configure LiteLLM
-litellm.set_verbose = settings.debug
+logger = create_logger(__name__)
 
 
 @dataclass
@@ -36,21 +32,12 @@ class LLMService:
     """LiteLLM-based LLM service supporting multiple providers."""
 
     def __init__(self) -> None:
-        self._model = settings.model_name
-        self._api_key = settings.api_key
-        self._provider = self._extract_provider(self._model)
-
-    def _extract_provider(self, model: str) -> str:
-        """Extract provider from model name."""
-        if "/" in model:
-            return model.split("/")[0]
-        if model.startswith("gpt"):
-            return "openai"
-        if model.startswith("claude"):
-            return "anthropic"
-        if model.startswith("gemini"):
-            return "google"
-        return "unknown"
+        configure_litellm()
+        ep = llm_endpoint()
+        self._model = ep.model
+        self._api_key = ep.api_key
+        self._api_base = ep.api_base
+        self._provider = ep.provider
 
     async def complete(
         self,
@@ -79,7 +66,8 @@ class LLMService:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    api_key=self._api_key,
+                    api_key=self._api_key or None,
+                    api_base=self._api_base,
                 ),
                 timeout=timeout_sec,
             )

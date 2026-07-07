@@ -51,12 +51,9 @@ from app.services.graphrag_workspace import (
     get_graphrag_workspace,
     graphrag_storage_prefix,
 )
-from app.services.project_access import (
-    has_admin_access,
-    user_can_access_project,
-    user_owns_project,
-)
+from app.services.project_access import user_can_access_project, user_owns_project
 from app.services.project_index_service import wipe_index_for_mode
+from app.services.project_lifecycle import delete_project_fully
 from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
 
@@ -123,15 +120,15 @@ async def list_projects(
     skip: int = 0,
     limit: int = 100,
 ) -> ProjectListResponse:
-    query = select(Project)
-    if not has_admin_access(current_user):
-        query = query.where(Project.owner_id == current_user.id)
+    query = select(Project).where(Project.owner_id == current_user.id)
     query = query.offset(skip).limit(limit).order_by(Project.created_at.desc())
     projects = (await db.execute(query)).scalars().all()
 
-    count_query = select(func.count()).select_from(Project)
-    if not has_admin_access(current_user):
-        count_query = count_query.where(Project.owner_id == current_user.id)
+    count_query = (
+        select(func.count())
+        .select_from(Project)
+        .where(Project.owner_id == current_user.id)
+    )
     total = (await db.execute(count_query)).scalar() or 0
 
     responses = []
@@ -240,18 +237,7 @@ async def delete_project(
     if not user_owns_project(current_user, project):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    rag_mode = project.rag_mode
-    if isinstance(rag_mode, str):
-        rag_mode = RagMode(rag_mode)
-    rag_config = parse_rag_config(rag_mode, project.rag_config)
-    try:
-        create_pipeline(rag_config, rag_mode=rag_mode).delete_project_data(
-            str(project.id)
-        )
-    except Exception as exc:
-        logger.error("Failed to delete project RAG data: %s", exc)
-
-    await db.delete(project)
+    await delete_project_fully(db, project)
     await db.commit()
 
 
@@ -384,21 +370,29 @@ async def switch_rag_mode(
     project = await _get_owned_project(db, project_id, current_user)
     new_mode = RagMode(body.rag_mode)
     old_mode = project.rag_mode
-    if new_mode == old_mode:
+    old_backend = graph_backend_for_project(old_mode, project.rag_config)
+    if new_mode == RagMode.GRAPH:
+        new_backend = body.graph_backend or (
+            old_backend if new_mode == old_mode else "neo4j"
+        )
+    else:
+        new_backend = old_backend
+
+    if new_mode == old_mode and (
+        new_mode != RagMode.GRAPH or new_backend == old_backend
+    ):
         return RagModeSwitchResponse(
             rag_mode=new_mode.value,
             message="Project is already in the requested mode",
             documents_queued=0,
         )
 
-    old_backend = graph_backend_for_project(old_mode, project.rag_config)
     wipe_index_for_mode(
         project_id,
         from_mode=old_mode.value if isinstance(old_mode, RagMode) else str(old_mode),
         graph_backend=old_backend,
     )
     project.rag_mode = new_mode
-    new_backend = body.graph_backend or "neo4j"
     if new_mode == RagMode.GRAPH:
         project.rag_config = default_rag_config_for_mode(
             new_mode, graph_backend=new_backend

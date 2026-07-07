@@ -20,10 +20,10 @@ from app.core.dependencies import (
     require_infra_admin,
 )
 from app.core.security import get_password_hash
-from app.db.models import Document, DocumentStatus, Project, User, UserRole
+from app.db.models import Document, DocumentStatus, Project, RagMode, User, UserRole
 from app.schemas.auth import UserResponse
-from app.services.storage import get_storage_service
-from app.services.vector_store import get_vector_store
+from app.services.project_access import user_can_administer_target
+from app.services.project_lifecycle import delete_document_fully, delete_project_fully
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -54,6 +54,32 @@ class UserStats(BaseModel):
     project_count: int
     document_count: int
     created_at: datetime
+
+
+class AdminDocumentSummary(BaseModel):
+    id: str
+    filename: str
+    status: str
+    size_bytes: int
+    chunk_count: int
+    created_at: datetime
+
+
+class AdminProjectSummary(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    rag_mode: str
+    document_count: int
+    created_at: datetime
+    documents: list[AdminDocumentSummary]
+
+
+class AdminUserProjectsResponse(BaseModel):
+    user_id: str
+    email: str
+    role: str
+    projects: list[AdminProjectSummary]
 
 
 @router.get("/users", response_model=list[UserResponse])
@@ -292,10 +318,112 @@ async def get_all_user_stats(
     return stats_list
 
 
+async def _require_can_administer_user(
+    admin: User,
+    target: User,
+) -> None:
+    if not user_can_administer_target(admin, target):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot manage this user's resources",
+        )
+
+
+@router.get("/users/{user_id}/projects", response_model=AdminUserProjectsResponse)
+async def list_user_projects(
+    user_id: UUID,
+    current_user: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AdminUserProjectsResponse:
+    """List projects and documents for a user (admin hierarchy enforced)."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    target_user = result.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await _require_can_administer_user(current_user, target_user)
+
+    projects_result = await db.execute(
+        select(Project)
+        .where(Project.owner_id == user_id)
+        .order_by(Project.created_at.desc())
+    )
+    projects = projects_result.scalars().all()
+
+    summaries: list[AdminProjectSummary] = []
+    for project in projects:
+        docs_result = await db.execute(
+            select(Document)
+            .where(Document.project_id == project.id)
+            .order_by(Document.created_at.desc())
+        )
+        documents = docs_result.scalars().all()
+        rag_mode = project.rag_mode
+        if isinstance(rag_mode, RagMode):
+            rag_mode = rag_mode.value
+        summaries.append(
+            AdminProjectSummary(
+                id=str(project.id),
+                name=project.name,
+                description=project.description,
+                rag_mode=str(rag_mode),
+                document_count=len(documents),
+                created_at=project.created_at,
+                documents=[
+                    AdminDocumentSummary(
+                        id=str(doc.id),
+                        filename=doc.filename,
+                        status=doc.status.value
+                        if isinstance(doc.status, DocumentStatus)
+                        else str(doc.status),
+                        size_bytes=doc.file_size,
+                        chunk_count=doc.chunk_count,
+                        created_at=doc.created_at,
+                    )
+                    for doc in documents
+                ],
+            )
+        )
+
+    return AdminUserProjectsResponse(
+        user_id=str(target_user.id),
+        email=target_user.email,
+        role=target_user.role.value,
+        projects=summaries,
+    )
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_project(
+    project_id: UUID,
+    current_user: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Delete another user's project (admin hierarchy enforced)."""
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    owner_result = await db.execute(select(User).where(User.id == project.owner_id))
+    owner = owner_result.scalar_one_or_none()
+    if not owner:
+        raise HTTPException(status_code=404, detail="Project owner not found")
+    await _require_can_administer_user(current_user, owner)
+
+    await delete_project_fully(db, project)
+    await db.commit()
+    logger.info(
+        "Admin %s deleted project %s owned by %s",
+        current_user.email,
+        project_id,
+        owner.email,
+    )
+
+
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_document(
     document_id: UUID,
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Delete any document (admin only, bypasses ownership)."""
@@ -308,20 +436,16 @@ async def admin_delete_document(
             detail="Document not found",
         )
 
-    try:
-        storage = get_storage_service()
-        if document.storage_path:
-            storage.delete_file(document.storage_path)
-    except Exception as e:
-        logger.warning(f"Failed to delete file from storage: {e}")
+    owner_result = await db.execute(
+        select(User)
+        .join(Project, Project.owner_id == User.id)
+        .where(Project.id == document.project_id)
+    )
+    owner = owner_result.scalar_one_or_none()
+    if owner:
+        await _require_can_administer_user(current_user, owner)
 
-    try:
-        vector_store = get_vector_store()
-        vector_store.delete_by_document(str(document_id))
-    except Exception as e:
-        logger.warning(f"Failed to delete vectors: {e}")
-
-    await db.delete(document)
+    await delete_document_fully(db, document, project_id=document.project_id)
     await db.commit()
 
     logger.info(f"Admin deleted document: {document_id}")

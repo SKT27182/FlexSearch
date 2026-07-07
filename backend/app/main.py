@@ -20,6 +20,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.utils.logger import create_logger
+from app.utils.logging_bridge import (
+    patch_graphrag_init_loggers,
+    setup_unified_logging,
+)
 
 from app.api import admin, auth, documents, projects, rag, retrieval
 from app.core.config import settings
@@ -31,6 +35,11 @@ from app.services.redis_client import close_redis
 from app.db.models import User
 
 logger = create_logger(__name__, level=settings.log_level)
+
+# Route GraphRAG/LiteLLM and all propagated loggers to ~/.local/share/dev-logs/.../backend.log
+_log_file = setup_unified_logging(settings.log_level)
+patch_graphrag_init_loggers()
+logger.info("Unified logging enabled (backend log: %s)", _log_file)
 
 
 @asynccontextmanager
@@ -45,6 +54,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Neo4j schema ensured")
     except Exception as exc:
         logger.warning("Neo4j schema bootstrap skipped: %s", exc)
+    try:
+        from app.services.graph_index_tasks import (
+            reconcile_interrupted_graph_indexes,
+        )
+
+        await reconcile_interrupted_graph_indexes()
+    except Exception as exc:
+        logger.warning("Graph index reconciliation skipped: %s", exc)
     yield
     # Shutdown
     logger.info("Shutting down FlexSearch Backend...")

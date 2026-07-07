@@ -1,5 +1,12 @@
 import axios, { type AxiosError, type AxiosInstance } from 'axios';
-import type { DocumentStatus, GraphIndexState, RagConfig, RagMode, RetrievalOverrides } from './rag-types';
+import type {
+  DocumentStatus,
+  GraphBackend,
+  GraphIndexState,
+  RagConfig,
+  RagMode,
+  RetrievalOverrides,
+} from './rag-types';
 
 const API_BASE_URL = '/api';
 
@@ -138,7 +145,10 @@ export interface CreateProject {
 export const projectsApi = {
   list: async (): Promise<Project[]> => {
     const { data } = await api.get<ProjectListResponse>('/projects');
-    return data.projects;
+    if (Array.isArray(data)) {
+      return data;
+    }
+    return data.projects ?? [];
   },
 
   get: async (id: string): Promise<Project> => {
@@ -193,11 +203,12 @@ export const projectsApi = {
 
   switchRagMode: async (
     id: string,
-    rag_mode: RagMode
+    rag_mode: RagMode,
+    graph_backend?: GraphBackend
   ): Promise<{ rag_mode: RagMode; message: string; documents_queued: number }> => {
     const { data } = await api.patch<{ rag_mode: RagMode; message: string; documents_queued: number }>(
       `/projects/${id}/rag-mode`,
-      { rag_mode }
+      { rag_mode, graph_backend }
     );
     return data;
   },
@@ -284,20 +295,25 @@ export interface RetrievalQueryResponse {
 
 export const ragApi = {
   getOptions: async (
-    rag_mode?: RagMode
+    rag_mode?: RagMode,
+    graph_backend?: GraphBackend
   ): Promise<{
     rag_mode: RagMode;
+    graph_backend?: GraphBackend;
     defaults: RagConfig;
     extraction_strategies: string[];
     chunking_strategies: string[];
     retrieval_strategies: string[];
     reranking_strategies: string[];
     graph_indexing?: Record<string, unknown>;
-    chunking_params: Record<string, Record<string, number | null>>;
+    chunking_params?: Record<string, Record<string, number | null>>;
     retrieval_params: Record<string, Record<string, unknown>>;
   }> => {
+    const params: Record<string, string> = {};
+    if (rag_mode) params.rag_mode = rag_mode;
+    if (graph_backend) params.graph_backend = graph_backend;
     const { data } = await api.get('/rag/options', {
-      params: rag_mode ? { rag_mode } : undefined,
+      params: Object.keys(params).length ? params : undefined,
     });
     return data;
   },
@@ -345,6 +361,32 @@ export interface AdminDocument {
   created_at: string;
 }
 
+export interface AdminDocumentSummary {
+  id: string;
+  filename: string;
+  status: string;
+  size_bytes: number;
+  chunk_count: number;
+  created_at: string;
+}
+
+export interface AdminProjectSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  rag_mode: string;
+  document_count: number;
+  created_at: string;
+  documents: AdminDocumentSummary[];
+}
+
+export interface AdminUserProjectsResponse {
+  user_id: string;
+  email: string;
+  role: string;
+  projects: AdminProjectSummary[];
+}
+
 export const adminApi = {
   getStats: async (): Promise<AdminSystemStats> => {
     const { data } = await api.get<AdminSystemStats>('/admin/stats');
@@ -378,6 +420,17 @@ export const adminApi = {
 
   deleteUser: async (userId: string): Promise<void> => {
     await api.delete(`/admin/users/${userId}`);
+  },
+
+  getUserProjects: async (userId: string): Promise<AdminUserProjectsResponse> => {
+    const { data } = await api.get<AdminUserProjectsResponse>(
+      `/admin/users/${userId}/projects`
+    );
+    return data;
+  },
+
+  deleteProject: async (projectId: string): Promise<void> => {
+    await api.delete(`/admin/projects/${projectId}`);
   },
 
   listDocuments: async (): Promise<AdminDocument[]> => {
