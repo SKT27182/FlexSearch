@@ -172,6 +172,8 @@ Reranking strategies are in [`reranking/`](reranking/).
 
 ## Graph RAG — Indexing Pipeline
 
+> **Detailed Neo4j guide:** For a step-by-step walkthrough (uploading 1–2 PDFs, sequence diagrams, retrieval internals, and full code references), see [`docs/neo4j-graph-rag/README.md`](../../docs/neo4j-graph-rag/README.md).
+
 Graph RAG replaces chunk embedding + Qdrant with LLM entity extraction and a Neo4j knowledge graph.
 
 **Prerequisite:** `API_KEY` must be set — `GraphExtractor` calls an LLM for each passage.

@@ -1,5 +1,12 @@
 # FlexSearch Backend
 
+## Documentation
+
+| Guide | Description |
+|---|---|
+| [Neo4j Graph RAG (end-to-end)](docs/neo4j-graph-rag/README.md) | Full pipeline: PDF upload → extraction → graph indexing → retrieval |
+| [RAG module overview](app/rag/README.md) | Vector vs Graph RAG, shared ingestion, module map |
+
 This backend is fully env-driven and reads runtime/deploy values from `backend/.env` via `app/core/config.py`.
 On startup, it also ensures the configured PostgreSQL database exists and creates tables if missing.
 
