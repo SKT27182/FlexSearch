@@ -20,10 +20,13 @@ from app.core.config import settings
 
 logger = create_logger(__name__, level=settings.log_level)
 
-# Create async engine
+# Create async engine.
+# Never use echo=True: SQLAlchemy installs its own StreamHandler (plain white
+# format) while the same events also propagate to our root/file handlers →
+# duplicate lines. SQL statement logging is configured in logging_bridge.
 engine = create_async_engine(
     settings.postgres_url,
-    echo=settings.debug,
+    echo=False,
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
@@ -207,7 +210,7 @@ async def ensure_database_exists() -> None:
     admin_url = db_url.set(database="postgres")
     admin_engine = create_async_engine(
         admin_url,
-        echo=settings.debug,
+        echo=False,
         isolation_level="AUTOCOMMIT",
         pool_pre_ping=True,
     )

@@ -36,7 +36,7 @@ async def test_switch_vector_to_graph(
     vector_store = MagicMock()
     storage = MagicMock()
     monkeypatch.setattr(
-        "app.services.project_index_service.get_vector_store",
+        "app.services.project_index_service.get_search_store",
         lambda: vector_store,
     )
     monkeypatch.setattr(

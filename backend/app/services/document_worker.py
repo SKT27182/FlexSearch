@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import Document, DocumentStatus, Project, RagMode
 from app.db.postgres import async_session_maker
+from app.observability.metrics import metrics
 from app.rag.graph.indexer import GraphIndexer
+from app.rag.ingestion.preprocess import preprocess_extracted_text
 from app.rag.pipeline import create_pipeline
 from app.schemas.rag_config import (
     GraphRagConfig,
@@ -31,11 +33,19 @@ from app.services.document_storage import (
 )
 from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
 from app.services.storage import get_storage_service
+from app.services.summary_tasks import schedule_document_summary, cancel_document_summary
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
 CONTENT_PREVIEW_MAX = 500_000
+
+
+class DocumentIngestError(Exception):
+    """Ingest failed after document status was updated (or document missing).
+
+    Raised so Celery marks the task as FAILURE instead of returning success.
+    """
 
 
 class ReindexMode(str, Enum):
@@ -73,9 +83,10 @@ async def _update_graph_index_status(
     error: str | None = None,
 ) -> None:
     stats = get_neo4j_store().get_stats(str(project.id))
-    project.graph_index_status = {
+    now = datetime.now(timezone.utc).isoformat()
+    payload: dict[str, Any] = {
         "status": status,
-        "indexed_at": datetime.now(timezone.utc).isoformat(),
+        "indexed_at": now,
         "entity_count": stats.entity_count,
         "passage_count": stats.passage_count,
         "error": error,
@@ -85,6 +96,9 @@ async def _update_graph_index_status(
             else None
         ),
     }
+    if status == "indexing":
+        payload["indexing_started_at"] = now
+    project.graph_index_status = payload
     await db.commit()
 
 
@@ -154,6 +168,42 @@ async def _count_non_terminal_documents(
     return int(result.scalar() or 0)
 
 
+async def _safe_fail_document(
+    db: AsyncSession,
+    document: Document,
+    project: Project,
+    *,
+    processing_step: str,
+    error_message: str,
+    mark_graph_failed: bool = False,
+) -> None:
+    """Best-effort FAILED status; ignore if the row was deleted mid-ingest."""
+    if mark_graph_failed:
+        try:
+            await _update_graph_index_status(
+                db, project, status="failed", error=error_message
+            )
+        except Exception:
+            logger.debug(
+                "Could not mark graph index failed for project=%s",
+                project.id,
+                exc_info=True,
+            )
+    updated = await update_document_status(
+        db,
+        document,
+        status=DocumentStatus.FAILED,
+        processing_step=processing_step,
+        progress_pct=0,
+        error_message=error_message,
+    )
+    if not updated:
+        logger.info(
+            "Document %s gone during fail update (likely deleted); skipping status write",
+            document.id,
+        )
+
+
 async def process_document(
     document_id: UUID,
     project_id: UUID,
@@ -161,6 +211,9 @@ async def process_document(
     force_full_extract: bool = False,
     mode: ReindexMode = ReindexMode.AUTO,
 ) -> None:
+    import time
+
+    ingest_started = time.perf_counter()
     async with async_session_maker() as db:
         result = await db.execute(
             select(Document).where(
@@ -171,7 +224,8 @@ async def process_document(
         document = result.scalar_one_or_none()
         if not document:
             logger.error("Document %s not found", document_id)
-            return
+            metrics.record_ingest(status="missing")
+            raise DocumentIngestError(f"Document not found: {document_id}")
 
         rag_mode, rag_config, project = await get_project_rag_context(db, project_id)
         pipeline = create_pipeline(rag_config, rag_mode=rag_mode)
@@ -187,7 +241,13 @@ async def process_document(
                 progress_pct=0,
                 error_message="Set API_KEY in backend/.env for Graph RAG indexing",
             )
-            return
+            metrics.record_ingest(
+                status="failed",
+                seconds=time.perf_counter() - ingest_started,
+            )
+            raise DocumentIngestError(
+                "Graph RAG requires LLM API key (set API_KEY in backend/.env)"
+            )
 
         try:
             md_key = extracted_md_key(project_id, document_id)
@@ -266,10 +326,32 @@ async def process_document(
                     progress_pct=0,
                     error_message="No text could be extracted from this file",
                 )
-                return
+                raise DocumentIngestError(
+                    "No text could be extracted from this file"
+                )
+
+            # Post-extract preprocess (ftfy / whitespace / headers)
+            preprocess_cfg = getattr(rag_config.extraction, "preprocess", None)
+            if preprocess_cfg is None or preprocess_cfg.enabled:
+                extracted.text = preprocess_extracted_text(
+                    extracted.text,
+                    fix_encoding=True if preprocess_cfg is None else preprocess_cfg.fix_encoding,
+                    normalize_ws=(
+                        True
+                        if preprocess_cfg is None
+                        else preprocess_cfg.normalize_whitespace
+                    ),
+                    strip_headers_footers=(
+                        True
+                        if preprocess_cfg is None
+                        else preprocess_cfg.strip_headers_footers
+                    ),
+                )
 
             content_format = (
-                "markdown" if rag_config.extraction.strategy == "vlm" else "plain"
+                "markdown"
+                if rag_config.extraction.strategy in {"vlm", "docling"}
+                else "plain"
             )
             text_bytes = extracted.text.encode("utf-8")
             storage.upload_file(
@@ -327,27 +409,41 @@ async def process_document(
 
         except Neo4jStoreError as exc:
             logger.exception("Neo4j error processing document %s", document_id)
-            await _update_graph_index_status(
-                db, project, status="failed", error=str(exc)
-            )
-            await update_document_status(
+            await _safe_fail_document(
                 db,
                 document,
-                status=DocumentStatus.FAILED,
+                project,
                 processing_step="Neo4j unavailable",
-                progress_pct=0,
                 error_message=str(exc),
+                mark_graph_failed=True,
             )
+            metrics.record_ingest(
+                status="failed",
+                seconds=time.perf_counter() - ingest_started,
+            )
+            raise DocumentIngestError(str(exc)) from exc
+        except DocumentIngestError:
+            raise
         except Exception as exc:
             logger.exception("Document processing failed: %s", document_id)
-            await update_document_status(
+            await _safe_fail_document(
                 db,
                 document,
-                status=DocumentStatus.FAILED,
+                project,
                 processing_step="Failed",
-                progress_pct=0,
                 error_message=str(exc),
+                mark_graph_failed=(rag_mode == RagMode.GRAPH),
             )
+            metrics.record_ingest(
+                status="failed",
+                seconds=time.perf_counter() - ingest_started,
+            )
+            raise DocumentIngestError(str(exc)) from exc
+
+        metrics.record_ingest(
+            status="completed",
+            seconds=time.perf_counter() - ingest_started,
+        )
 
 
 async def _complete_graph_document(db: AsyncSession, document: Document) -> None:
@@ -371,6 +467,10 @@ async def _run_chunk_and_index(
     text: str | None = None,
     page_count: int = 0,
 ) -> None:
+    # Stop in-flight summary before wipe so it cannot re-upsert stale docs,
+    # and so schedule_document_summary at the end is not blocked.
+    cancel_document_summary(document.id)
+
     pipeline.delete_document_data(
         str(document.id), project_id=str(document.project_id)
     )
@@ -403,7 +503,7 @@ async def _run_chunk_and_index(
         db,
         document,
         status=DocumentStatus.INDEXING,
-        processing_step="Indexing vectors in Qdrant…",
+        processing_step="Indexing vectors in OpenSearch…",
         progress_pct=85,
     )
 
@@ -415,6 +515,10 @@ async def _run_chunk_and_index(
         progress_pct=100,
         chunk_count=chunk_count,
     )
+
+    # Hierarchical summaries (vector only; skip if disabled)
+    if isinstance(rag_config, VectorRagConfig) and rag_config.summaries.enabled:
+        schedule_document_summary(document.id, document.project_id)
 
 
 async def _run_graph_index(
@@ -457,7 +561,7 @@ async def _run_graph_index(
 
     await _update_graph_index_status(db, project, status="ready")
 
-    await update_document_status(
+    updated = await update_document_status(
         db,
         document,
         status=DocumentStatus.COMPLETED,
@@ -465,3 +569,10 @@ async def _run_graph_index(
         progress_pct=100,
         chunk_count=stats.passage_count,
     )
+    if not updated:
+        # Deleted while indexing — subgraph already wiped by delete API.
+        logger.info(
+            "Document %s deleted during graph index; not marking completed",
+            document.id,
+        )
+        return

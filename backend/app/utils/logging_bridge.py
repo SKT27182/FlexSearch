@@ -1,10 +1,10 @@
-"""Bridge third-party loggers (GraphRAG, LiteLLM, etc.) into the FlexSearch backend log.
+"""Bridge third-party loggers into the FlexSearch colored / unified logging stack.
 
 Dev runs tee stdout to ``~/.local/share/dev-logs/flexsearch/backend.log`` via the
 Makefile, but GraphRAG's ``init_loggers`` writes only to a workspace-local file
 (``indexing-engine.log``), so extraction errors never appeared in the backend log.
-This module attaches a shared file handler on the root logger and routes GraphRAG
-loggers through it instead.
+This module attaches a shared file handler on the root logger and routes GraphRAG,
+SQLAlchemy, and uvicorn loggers through the same colored console format.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from app.core.config import settings
+from app.utils.logger import CustomFormatter
 
 _CONFIGURED = False
 
@@ -57,6 +58,13 @@ def _level_int(level: str | int) -> int:
     return mapping.get(level.lower(), logging.INFO)
 
 
+def sql_echo_enabled() -> bool:
+    """Whether SQL statements should be logged (single path, no engine echo=)."""
+    if settings.sql_echo:
+        return True
+    return str(settings.log_level).lower() == "debug"
+
+
 def _has_backend_file_handler(root: logging.Logger, path: Path) -> bool:
     target = str(path.resolve())
     for handler in root.handlers:
@@ -64,6 +72,80 @@ def _has_backend_file_handler(root: logging.Logger, path: Path) -> bool:
             if Path(handler.baseFilename).resolve() == Path(target):
                 return True
     return False
+
+
+def _has_colored_console_handler(logger: logging.Logger) -> bool:
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(
+            handler, logging.FileHandler
+        ):
+            if isinstance(handler.formatter, CustomFormatter):
+                return True
+    return False
+
+
+def _clear_non_file_handlers(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            continue
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
+def _attach_colored_console(
+    logger: logging.Logger,
+    level: int,
+    *,
+    propagate: bool = True,
+) -> None:
+    """Replace plain StreamHandlers with one colored console handler.
+
+    Clearing other StreamHandlers removes SQLAlchemy ``echo=`` / uvicorn default
+    handlers that print the plain white format. ``propagate=True`` lets the root
+    file handler receive the same record once.
+    """
+    logger.setLevel(level)
+    _clear_non_file_handlers(logger)
+
+    if not _has_colored_console_handler(logger):
+        console = logging.StreamHandler()
+        console.setLevel(level)
+        console.setFormatter(CustomFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
+        logger.addHandler(console)
+
+    logger.propagate = propagate
+
+
+def configure_third_party_loggers(level: str | None = None) -> None:
+    """Route uvicorn + SQLAlchemy through the colored console formatter."""
+    level_int = _level_int(level or settings.log_level)
+    sql_level = logging.INFO if sql_echo_enabled() else logging.WARNING
+
+    # SQLAlchemy: single colored console path (never engine echo= StreamHandler).
+    for name in ("sqlalchemy.engine", "sqlalchemy.pool"):
+        _attach_colored_console(logging.getLogger(name), sql_level, propagate=True)
+
+    # uvicorn.error has no handlers by default and propagates to "uvicorn".
+    # uvicorn.access has its own handler with propagate=False.
+    # Give "uvicorn" the colored console; access gets its own to avoid relying
+    # on parent (which would double if both had handlers + propagate).
+    _attach_colored_console(logging.getLogger("uvicorn"), level_int, propagate=True)
+
+    error_logger = logging.getLogger("uvicorn.error")
+    _clear_non_file_handlers(error_logger)
+    error_logger.setLevel(level_int)
+    error_logger.propagate = True  # → uvicorn colored console → root file
+
+    # Own colored handler; propagate=False so parent "uvicorn" does not reprint.
+    # Makefile tee of stdout still captures access lines into backend.log.
+    _attach_colored_console(
+        logging.getLogger("uvicorn.access"),
+        level_int,
+        propagate=False,
+    )
 
 
 def setup_unified_logging(level: str | None = None) -> Path:
@@ -88,6 +170,7 @@ def setup_unified_logging(level: str | None = None) -> Path:
         bridged.propagate = True
         bridged.setLevel(level_int)
 
+    configure_third_party_loggers(level)
     _CONFIGURED = True
     return log_path
 

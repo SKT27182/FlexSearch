@@ -19,10 +19,21 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    volumes:
-      - qdrant_data:/qdrant/storage
+  opensearch:
+    image: opensearchproject/opensearch:2
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "63791:6379"
     restart: unless-stopped
 
   minio:
@@ -41,14 +52,33 @@ services:
       dockerfile: Dockerfile
     environment:
       - DATABASE_URL=postgresql+asyncpg://flexsearch:${DB_PASSWORD}@postgres:5432/flexsearch
-      - QDRANT_HOST=qdrant
+      - OPENSEARCH_URL=http://opensearch:9200
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
     depends_on:
       - postgres
-      - qdrant
+      - opensearch
+      - redis
       - minio
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    depends_on:
+      - backend
+      - opensearch
+      - redis
     restart: unless-stopped
 
   frontend:
@@ -74,7 +104,6 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:
   minio_data:
 ```
 
@@ -204,7 +233,8 @@ pnpm run build
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL async connection string |
 | `JWT_SECRET_KEY` | Yes | Secret for JWT signing |
-| `QDRANT_HOST` | Yes | Qdrant server hostname |
+| `OPENSEARCH_URL` | Yes | OpenSearch HTTP URL |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Yes | Redis for SSE + Celery |
 | `MINIO_ENDPOINT` | Yes | MinIO server endpoint |
 | `MINIO_ACCESS_KEY` | Yes | MinIO access key |
 | `MINIO_SECRET_KEY` | Yes | MinIO secret key |

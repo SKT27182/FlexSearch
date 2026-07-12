@@ -10,6 +10,11 @@ services:
     restart: unless-stopped
     env_file:
       - backend/.env
+    environment:
+      # Containers on infra-network use Docker DNS names
+      OPENSEARCH_URL: http://opensearch:9200
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
       - "127.0.0.1:8889:8889"
     networks:
@@ -20,6 +25,26 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: flexsearch-worker
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CELERY_QUEUES: ingest,graph,summary,default
+      CELERY_CONCURRENCY: "2"
+    networks:
+      - infra-network
+    depends_on:
+      backend:
+        condition: service_healthy
 
   frontend:
     build:

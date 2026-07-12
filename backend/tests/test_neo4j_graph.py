@@ -1,7 +1,7 @@
 """Tests for graph RAG extraction and config."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -67,3 +67,55 @@ async def test_extractor_parses_llm_response() -> None:
     assert len(result.entities) == 2
     assert len(result.relationships) == 1
     assert result.entities[0].name == "Alice"
+
+
+def test_ensure_entity_vector_index_creates_when_missing() -> None:
+    from app.services.neo4j_store import Neo4jStore
+
+    store = Neo4jStore()
+    session = MagicMock()
+    session.run.return_value.single.return_value = None  # no existing index
+
+    store._ensure_entity_vector_index(session, 384)
+
+    # SHOW INDEXES + CREATE VECTOR INDEX
+    assert session.run.call_count >= 2
+    create_calls = [
+        c.args[0] for c in session.run.call_args_list if c.args and "CREATE VECTOR INDEX" in c.args[0]
+    ]
+    assert create_calls
+    assert "384" in create_calls[0]
+
+
+def test_ensure_entity_vector_index_recreates_on_dimension_mismatch() -> None:
+    from app.services.neo4j_store import Neo4jStore
+
+    store = Neo4jStore()
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "options": {"indexConfig": {"vector.dimensions": 384}}
+    }
+
+    store._ensure_entity_vector_index(session, 768)
+
+    stmts = [c.args[0] for c in session.run.call_args_list if c.args]
+    assert any("DROP INDEX entity_embedding" in s for s in stmts)
+    assert any("SET e.embedding = null" in s for s in stmts)
+    assert any("CREATE VECTOR INDEX entity_embedding" in s and "768" in s for s in stmts)
+
+
+def test_ensure_entity_vector_index_noop_when_dim_matches() -> None:
+    from app.services.neo4j_store import Neo4jStore
+
+    store = Neo4jStore()
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "options": {"indexConfig": {"vector.dimensions": 384}}
+    }
+
+    store._ensure_entity_vector_index(session, 384)
+
+    # Only SHOW INDEXES — no drop/create
+    assert session.run.call_count == 1
+    assert "SHOW INDEXES" in session.run.call_args.args[0]
+

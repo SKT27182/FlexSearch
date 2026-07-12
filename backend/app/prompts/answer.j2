@@ -1,0 +1,15 @@
+Context passages (cite with [n]):
+{% for passage in passages %}
+[{{ loop.index }}] {% if passage.filename %}({{ passage.filename }}) {% endif %}{{ passage.content }}
+{% endfor %}
+
+{% if history %}
+Recent conversation:
+{% for turn in history %}
+{{ turn.role | capitalize }}: {{ turn.content }}
+{% endfor %}
+{% endif %}
+
+User question: {{ question }}
+
+Write a clear answer grounded in the context. Use [n] citations where claims come from passages.

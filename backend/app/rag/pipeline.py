@@ -30,7 +30,9 @@ from app.schemas.rag_config import (
     VectorRagConfig,
 )
 from app.services.neo4j_store import get_neo4j_store
-from app.services.vector_store import get_vector_store
+from app.services.search_store import get_search_store
+from app.services.search_store.types import SearchDocument
+from app.observability.metrics import metrics
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -48,7 +50,7 @@ class RAGPipeline:
         self._rag_mode = rag_mode
         self._extraction = build_extraction_strategy(config.extraction)
         self._embedding = get_embedding_service()
-        self._vector_store = get_vector_store()
+        self._search_store = get_search_store()
         self._neo4j = get_neo4j_store()
         if rag_mode == RagMode.VECTOR:
             assert isinstance(config, VectorRagConfig)
@@ -89,7 +91,7 @@ class RAGPipeline:
     ) -> list[Chunk]:
         if self._chunking is None:
             raise RuntimeError("chunk_text is only available for vector mode")
-        return self._chunking.chunk(
+        chunks = self._chunking.chunk(
             text=text,
             document_id=document_id,
             metadata={
@@ -98,6 +100,12 @@ class RAGPipeline:
                 "page_count": page_count,
             },
         )
+        # Hierarchy metadata (heading breadcrumbs) when enabled
+        if isinstance(self._config, VectorRagConfig) and self._config.extraction.extract_hierarchy:
+            from app.rag.ingestion.hierarchy import annotate_chunks_with_hierarchy
+
+            annotate_chunks_with_hierarchy(text, chunks)
+        return chunks
 
     def index_chunks(
         self,
@@ -112,25 +120,38 @@ class RAGPipeline:
             return 0
         chunk_texts = [chunk.content for chunk in chunks]
         embeddings = self._embedding.embed_batch(chunk_texts)
-        ids = [
-            str(uuid5(NAMESPACE_DNS, f"{document_id}_{chunk.chunk_index}"))
-            for chunk in chunks
-        ]
-        payloads = [
-            {
-                "content": chunk.content,
-                "document_id": document_id,
-                "project_id": project_id,
-                "chunk_index": chunk.chunk_index,
-                "filename": filename,
-                "start_char": chunk.start_char,
-                "end_char": chunk.end_char,
-                "parent_id": chunk.parent_id,
-                **chunk.metadata,
-            }
-            for chunk in chunks
-        ]
-        self._vector_store.upsert_vectors(ids, embeddings, payloads)
+        documents: list[SearchDocument] = []
+        for chunk, embedding in zip(chunks, embeddings):
+            meta = dict(chunk.metadata)
+            chunk_type = meta.pop("chunk_type", None)
+            parent_chunk_id = meta.pop("parent_chunk_id", None)
+            meta.pop("is_parent", None)
+            # Parents are stored under their stable parent_chunk_id so children
+            # can resolve them via get_by_ids(parent_id).
+            if chunk_type == "parent" and parent_chunk_id:
+                doc_id = parent_chunk_id
+            else:
+                doc_id = str(
+                    uuid5(NAMESPACE_DNS, f"{document_id}_{chunk.chunk_index}")
+                )
+            documents.append(
+                SearchDocument(
+                    id=doc_id,
+                    embedding=embedding,
+                    content=chunk.content,
+                    project_id=project_id,
+                    document_id=document_id,
+                    chunk_index=chunk.chunk_index,
+                    chunk_type=chunk_type,
+                    parent_id=chunk.parent_id,
+                    summary_level="chunk",
+                    filename=filename,
+                    start_char=chunk.start_char,
+                    end_char=chunk.end_char,
+                    extra=meta,
+                )
+            )
+        self._search_store.upsert(documents)
         return len(chunks)
 
     async def ingest_from_text(
@@ -151,17 +172,28 @@ class RAGPipeline:
         top_k: int = 5,
         overrides: RetrievalOverrides | None = None,
     ) -> tuple[list[RetrievalResult], str, str]:
+        import time
+
+        started = time.perf_counter()
         if self._rag_mode == RagMode.GRAPH:
             assert isinstance(self._config, GraphRagConfig)
             effective = GraphEffectiveRagConfig.for_retrieval(
                 self._config, overrides, top_k=top_k
             )
-            retrieval = build_graph_retrieval_strategy(effective.retrieval)
+            # Pass full effective config so graph_backend reaches the factory
+            # (bare GraphRetrievalConfig defaults to neo4j).
+            retrieval = build_graph_retrieval_strategy(effective)
             k = effective.top_k
             results = await retrieval.retrieve(
                 query=query,
                 project_id=project_id,
                 top_k=k,
+            )
+            metrics.record_retrieval(
+                strategy=retrieval.name,
+                hit_count=len(results),
+                seconds=time.perf_counter() - started,
+                rag_mode="graph",
             )
             return results, retrieval.name, "none"
 
@@ -169,7 +201,12 @@ class RAGPipeline:
         effective = EffectiveRagConfig.for_retrieval(
             self._config, overrides, top_k=top_k
         )
-        retrieval = build_retrieval_strategy(effective.retrieval, rag_mode=self._rag_mode)
+        hierarchy_mode = effective.summaries.retrieval_mode
+        retrieval = build_retrieval_strategy(
+            effective.retrieval,
+            rag_mode=self._rag_mode,
+            hierarchy_mode=hierarchy_mode,
+        )
         reranking = build_reranking_strategy(
             effective.reranking, rag_mode=self._rag_mode
         )
@@ -181,6 +218,12 @@ class RAGPipeline:
             top_k=k * 2,
         )
         reranked = await reranking.rerank(query=query, results=results, top_k=k)
+        metrics.record_retrieval(
+            strategy=retrieval.name,
+            hit_count=len(reranked),
+            seconds=time.perf_counter() - started,
+            rag_mode="vector",
+        )
         return reranked, retrieval.name, reranking.name
 
     async def query(
@@ -213,8 +256,8 @@ class RAGPipeline:
             self._neo4j.delete_project_subgraph(project_id)
             logger.info("Deleted Neo4j graph for project: %s", project_id)
         else:
-            self._vector_store.delete_by_project(project_id)
-            logger.info("Deleted Qdrant data for project: %s", project_id)
+            self._search_store.delete_by_project(project_id)
+            logger.info("Deleted OpenSearch data for project: %s", project_id)
 
     def delete_document_data(self, document_id: str, project_id: str | None = None) -> None:
         if self._rag_mode == RagMode.GRAPH:
@@ -227,8 +270,8 @@ class RAGPipeline:
             self._neo4j.delete_document_subgraph(project_id, document_id)
             logger.info("Deleted Neo4j data for document: %s", document_id)
         else:
-            self._vector_store.delete_by_document(document_id)
-            logger.info("Deleted Qdrant data for document: %s", document_id)
+            self._search_store.delete_by_document(document_id)
+            logger.info("Deleted OpenSearch data for document: %s", document_id)
 
 
 def create_pipeline(

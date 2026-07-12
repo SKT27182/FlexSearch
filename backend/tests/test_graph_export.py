@@ -8,8 +8,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, RagMode
+from app.db.models import Project
 from app.schemas.graph_index import GraphIndexState
+from app.schemas.rag_config import GraphRagConfig
 
 
 async def _login(client: AsyncClient, email: str) -> str:
@@ -24,6 +25,24 @@ async def _login(client: AsyncClient, email: str) -> str:
     return resp.json()["access_token"]
 
 
+async def _create_microsoft_graph_project(
+    client: AsyncClient, token: str, name: str
+) -> str:
+    create = await client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "rag_mode": "graph",
+            "rag_config": GraphRagConfig.from_settings(
+                graph_backend="microsoft"
+            ).to_db(),
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert create.status_code == 201
+    return create.json()["id"]
+
+
 @pytest.mark.asyncio
 async def test_graph_export_requires_ready_index(
     async_client: AsyncClient,
@@ -31,12 +50,9 @@ async def test_graph_export_requires_ready_index(
     monkeypatch,
 ) -> None:
     token = await _login(async_client, "export@example.com")
-    create = await async_client.post(
-        "/api/projects",
-        json={"name": "Graph Project", "rag_mode": "graph"},
-        headers={"Authorization": f"Bearer {token}"},
+    project_id = await _create_microsoft_graph_project(
+        async_client, token, "Graph Project"
     )
-    project_id = create.json()["id"]
     response = await async_client.get(
         f"/api/projects/{project_id}/graph-export",
         headers={"Authorization": f"Bearer {token}"},
@@ -51,12 +67,9 @@ async def test_graph_export_zip_contents(
     monkeypatch,
 ) -> None:
     token = await _login(async_client, "export2@example.com")
-    create = await async_client.post(
-        "/api/projects",
-        json={"name": "Graph Ready", "rag_mode": "graph"},
-        headers={"Authorization": f"Bearer {token}"},
+    project_id = await _create_microsoft_graph_project(
+        async_client, token, "Graph Ready"
     )
-    project_id = create.json()["id"]
 
     from uuid import UUID
 

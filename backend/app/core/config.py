@@ -73,34 +73,66 @@ class Settings(BaseSettings):
                 f"redis://:{pwd}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
             )
 
+        if not self.celery_broker_url:
+            self.celery_broker_url = self.redis_url
+        if not self.celery_result_backend:
+            self.celery_result_backend = self.redis_url
+
         return self
 
     # =========================================================================
-    # QDRANT
+    # OPENSEARCH (vector + BM25 + hybrid; consume infra-hub as-is)
     # =========================================================================
-    qdrant_url: str = Field(
-        default="http://localhost:6333",
-        description="Qdrant server URL",
+    opensearch_url: str = Field(
+        default="http://127.0.0.1:9200",
+        description=(
+            "OpenSearch HTTP URL. Host/local: http://127.0.0.1:9200; "
+            "containers on infra-network: http://opensearch:9200"
+        ),
     )
-    qdrant_api_key: str = Field(
+    opensearch_index_prefix: str = Field(
+        default="flexsearch",
+        description="Prefix for FlexSearch indices",
+    )
+    opensearch_index_name: str = Field(
+        default="chunks",
+        description="Index name suffix (full name = prefix_suffix)",
+    )
+    opensearch_username: str = Field(
         default="",
-        description="Qdrant API key (optional)",
+        description="Optional basic-auth username (future; hub security is off)",
     )
-    qdrant_http_port: int = Field(
-        default=6333,
-        description="Qdrant HTTP port for public/admin links",
+    opensearch_password: str = Field(
+        default="",
+        description="Optional basic-auth password",
     )
-    qdrant_grpc_port: int = Field(
-        default=6334,
-        description="Qdrant gRPC port",
+    opensearch_use_ssl: bool = Field(
+        default=False,
+        description="Use TLS for OpenSearch (future)",
     )
-    qdrant_hnsw_m: int = Field(
+    opensearch_verify_certs: bool = Field(
+        default=False,
+        description="Verify TLS certificates when SSL is enabled",
+    )
+    opensearch_http_port: int = Field(
+        default=9200,
+        description="OpenSearch HTTP port for public/admin links",
+    )
+    opensearch_dashboards_port: int = Field(
+        default=5601,
+        description="OpenSearch Dashboards port for admin links",
+    )
+    opensearch_knn_m: int = Field(
         default=16,
-        description="HNSW graph connections parameter",
+        description="HNSW m parameter for knn_vector",
     )
-    qdrant_hnsw_ef: int = Field(
+    opensearch_knn_ef_construction: int = Field(
         default=100,
-        description="HNSW search parameter",
+        description="HNSW ef_construction for knn_vector",
+    )
+    opensearch_knn_ef_search: int = Field(
+        default=100,
+        description="HNSW ef_search (index setting knn.algo_param.ef_search)",
     )
 
     # =========================================================================
@@ -134,7 +166,9 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
-    # REDIS (document status pub/sub + SSE; align with infra-hub backend/.env)
+    # REDIS (SSE progress + Celery broker; align with infra-hub backend/.env)
+    # Host/local: redis://:${REDIS_PASSWORD}@127.0.0.1:63791/0
+    # Containers on infra-network: redis://:${REDIS_PASSWORD}@redis:6379/0
     # =========================================================================
     redis_host: str = Field(
         default="127.0.0.1",
@@ -155,6 +189,75 @@ class Settings(BaseSettings):
     redis_url: Optional[str] = Field(
         default=None,
         description="Full Redis URL (overrides host/port/password/db if set)",
+    )
+
+    # =========================================================================
+    # CELERY (app-owned workers; broker = same Redis as above)
+    # =========================================================================
+    celery_broker_url: Optional[str] = Field(
+        default=None,
+        description="Celery broker URL (defaults to REDIS_URL)",
+    )
+    celery_result_backend: Optional[str] = Field(
+        default=None,
+        description="Celery result backend URL (defaults to REDIS_URL)",
+    )
+    celery_task_always_eager: bool = Field(
+        default=False,
+        description="Run Celery tasks inline (tests / local without workers)",
+    )
+
+    # =========================================================================
+    # WEBSITE CRAWLER (Phase 4)
+    # =========================================================================
+    crawl_max_depth: int = Field(default=2, ge=0, le=10)
+    crawl_max_pages: int = Field(default=50, ge=1, le=500)
+    crawl_rate_limit: float = Field(
+        default=0.5,
+        ge=0,
+        description="Seconds between HTTP requests during crawl",
+    )
+    crawl_respect_robots: bool = Field(default=True)
+    crawl_use_sitemap: bool = Field(default=True)
+    crawl_block_private_urls: bool = Field(
+        default=True,
+        description="Reject crawl/bulk URLs that resolve to private/loopback IPs (SSRF)",
+    )
+
+    # =========================================================================
+    # RATE LIMITS (Phase 5 — sensitive APIs)
+    # =========================================================================
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enforce per-user/IP rate limits on chat/crawl/bulk APIs",
+    )
+    rate_limit_chat_per_minute: int = Field(
+        default=60,
+        ge=0,
+        description="Max chat query/stream requests per user per minute (0=unlimited)",
+    )
+    rate_limit_crawl_per_minute: int = Field(
+        default=10,
+        ge=0,
+        description="Max crawl submit requests per user per minute",
+    )
+    rate_limit_bulk_per_minute: int = Field(
+        default=10,
+        ge=0,
+        description="Max bulk import/export requests per user per minute",
+    )
+    rate_limit_sensitive_per_minute: int = Field(
+        default=30,
+        ge=0,
+        description="Max other sensitive API requests per user per minute",
+    )
+
+    # =========================================================================
+    # OBSERVABILITY (Phase 5)
+    # =========================================================================
+    metrics_enabled: bool = Field(
+        default=True,
+        description="Expose Prometheus-text metrics at GET /metrics",
     )
 
     # =========================================================================
@@ -230,7 +333,7 @@ class Settings(BaseSettings):
     # =========================================================================
     # RAG STRATEGIES
     # =========================================================================
-    extraction_strategy: Literal["ocr", "vlm"] = Field(
+    extraction_strategy: Literal["ocr", "vlm", "docling", "hybrid_pdf"] = Field(
         default="ocr",
         description="Document extraction strategy",
     )
@@ -336,17 +439,25 @@ class Settings(BaseSettings):
     )
     # Service metadata (only services used by FlexSearch)
     postgres_service_name: str = Field(default="postgres")
-    qdrant_service_name: str = Field(default="qdrant")
+    opensearch_service_name: str = Field(default="opensearch")
     minio_service_name: str = Field(default="minio")
     postgres_display_name: str = Field(default="PostgreSQL")
-    qdrant_display_name: str = Field(default="Qdrant")
+    opensearch_display_name: str = Field(default="OpenSearch")
     minio_display_name: str = Field(default="MinIO")
     postgres_container_name: str = Field(default="infra-postgres")
-    qdrant_container_name: str = Field(default="infra-qdrant")
+    opensearch_container_name: str = Field(default="infra-opensearch")
     minio_container_name: str = Field(default="infra-minio")
     log_level: str = Field(
         default="INFO",
         description="Logging level",
+    )
+    sql_echo: bool = Field(
+        default=False,
+        description=(
+            "Log SQL statements via the app logger (colored). "
+            "Also enabled automatically when LOG_LEVEL=DEBUG. "
+            "Never uses SQLAlchemy engine echo= (avoids duplicate white logs)."
+        ),
     )
 
     @model_validator(mode="after")
@@ -393,9 +504,21 @@ class Settings(BaseSettings):
         return origins
 
     @property
-    def qdrant_public_url(self) -> str:
-        """Public Qdrant URL based on deploy host and configured port."""
-        return f"http://{self.service_public_host}:{self.qdrant_http_port}"
+    def opensearch_index(self) -> str:
+        """Full OpenSearch index name: `{prefix}_{name}`."""
+        prefix = self.opensearch_index_prefix.strip("_")
+        name = self.opensearch_index_name.strip("_")
+        return f"{prefix}_{name}"
+
+    @property
+    def opensearch_public_url(self) -> str:
+        """Public OpenSearch HTTP URL based on deploy host and configured port."""
+        return f"http://{self.service_public_host}:{self.opensearch_http_port}"
+
+    @property
+    def opensearch_dashboards_url(self) -> str:
+        """Public OpenSearch Dashboards URL."""
+        return f"http://{self.service_public_host}:{self.opensearch_dashboards_port}"
 
     @property
     def minio_public_url(self) -> str:
@@ -411,7 +534,8 @@ class Settings(BaseSettings):
     def admin_urls(self) -> dict[str, str]:
         """Centralized service links for admin/UI usage."""
         return {
-            "qdrant": self.qdrant_public_url,
+            "opensearch": self.opensearch_public_url,
+            "opensearch_dashboards": self.opensearch_dashboards_url,
             "minio_api": self.minio_public_url,
             "minio_console": self.minio_console_url,
         }

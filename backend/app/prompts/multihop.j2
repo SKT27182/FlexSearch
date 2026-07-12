@@ -1,0 +1,15 @@
+Analyze whether answering this question requires multi-hop retrieval
+(multiple dependent sub-questions).
+{% if graph_aware %}
+Prefer decomposing into entity- and relation-focused sub-questions suitable
+for knowledge-graph style retrieval when helpful.
+{% endif %}
+Return JSON only with this shape:
+{"multihop": true|false, "hops": ["sub-question 1", "..."]}
+
+Use at most {{ max_hops }} hops. If multi-hop is not needed, set multihop to false
+and hops to [].
+
+Question: {{ question }}
+
+JSON:

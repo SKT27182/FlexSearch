@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from app.db.models import RagMode
 from app.schemas.rag_config import (
-    GraphEffectiveRagConfig,
     GraphRagConfig,
     RetrievalOverrides,
     VectorRagConfig,
-    EffectiveRagConfig,
 )
 
 VECTOR_STRATEGIES = frozenset({"dense", "bm25", "hybrid", "parent_child"})
@@ -19,11 +17,10 @@ def effective_retrieval_strategy(
     rag_config: VectorRagConfig | GraphRagConfig,
     overrides: RetrievalOverrides | None,
 ) -> str:
-    if isinstance(rag_config, GraphRagConfig):
-        effective = GraphEffectiveRagConfig.for_retrieval(rag_config, overrides)
-    else:
-        effective = EffectiveRagConfig.for_retrieval(rag_config, overrides)
-    return effective.retrieval.strategy
+    """Resolve strategy without building full effective config (avoids ValueError)."""
+    if overrides and overrides.retrieval_strategy is not None:
+        return overrides.retrieval_strategy
+    return rag_config.retrieval.strategy
 
 
 def validate_retrieval_for_mode(
@@ -34,12 +31,12 @@ def validate_retrieval_for_mode(
     """Return error message if strategy mismatches mode, else None."""
     strategy = effective_retrieval_strategy(rag_config, overrides)
     mode = rag_mode.value if isinstance(rag_mode, RagMode) else str(rag_mode)
-    if mode == "graph" and strategy in VECTOR_STRATEGIES:
+    if mode == "graph" and strategy not in GRAPH_STRATEGIES:
         return (
             f"Retrieval strategy '{strategy}' is not valid for graph projects. "
             "Use graph_local or graph_global."
         )
-    if mode == "vector" and strategy in GRAPH_STRATEGIES:
+    if mode == "vector" and strategy not in VECTOR_STRATEGIES:
         return (
             f"Retrieval strategy '{strategy}' is not valid for vector projects. "
             "Use dense, bm25, hybrid, or parent_child."

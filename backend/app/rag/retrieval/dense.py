@@ -1,12 +1,18 @@
 """
 FlexSearch Backend - Dense Retrieval Strategy
 
-Vector similarity search using Qdrant.
+Vector similarity search using OpenSearch knn.
 """
 
-from app.services.embedding import get_embedding_service
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
-from app.services.vector_store import get_vector_store
+from app.rag.retrieval.hierarchy import (
+    apply_hierarchy_postprocess,
+    filters_for_hierarchy,
+    hit_to_result,
+)
+from app.schemas.rag_config import HierarchyRetrievalMode
+from app.services.embedding import get_embedding_service
+from app.services.search_store import get_search_store
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -15,8 +21,14 @@ logger = create_logger(__name__)
 class DenseRetrieval(BaseRetrievalStrategy):
     """Dense vector retrieval using embeddings."""
 
-    def __init__(self, score_threshold: float | None = None) -> None:
+    def __init__(
+        self,
+        score_threshold: float | None = None,
+        *,
+        hierarchy_mode: HierarchyRetrievalMode = "chunks_only",
+    ) -> None:
         self._score_threshold = score_threshold
+        self._hierarchy_mode = hierarchy_mode
 
     @property
     def name(self) -> str:
@@ -29,37 +41,26 @@ class DenseRetrieval(BaseRetrievalStrategy):
         top_k: int = 5,
     ) -> list[RetrievalResult]:
         """Retrieve using dense vector search."""
-        # Generate query embedding
         embedding_service = get_embedding_service()
         query_vector = embedding_service.embed(query)
 
-        # Search in Qdrant
-        vector_store = get_vector_store()
-        results = vector_store.search(
+        store = get_search_store()
+        hits = store.dense_search(
             query_vector=query_vector,
-            project_id=project_id,
+            filters=filters_for_hierarchy(project_id, self._hierarchy_mode),
             top_k=top_k,
             score_threshold=self._score_threshold,
         )
 
-        # Convert to RetrievalResult
-        retrieval_results = []
-        for result in results:
-            payload = result.get("payload", {})
-            retrieval_results.append(
-                RetrievalResult(
-                    content=payload.get("content", ""),
-                    score=result.get("score", 0.0),
-                    document_id=payload.get("document_id", ""),
-                    chunk_id=result.get("id", ""),
-                    metadata={
-                        "filename": payload.get("filename", ""),
-                        "chunk_index": payload.get("chunk_index", 0),
-                    },
-                )
-            )
+        retrieval_results = [hit_to_result(hit) for hit in hits]
+        retrieval_results = apply_hierarchy_postprocess(
+            retrieval_results, self._hierarchy_mode
+        )[:top_k]
 
         logger.debug(
-            f"Retrieved {len(retrieval_results)} results for project {project_id}"
+            "Retrieved %d dense results for project %s (mode=%s)",
+            len(retrieval_results),
+            project_id,
+            self._hierarchy_mode,
         )
         return retrieval_results

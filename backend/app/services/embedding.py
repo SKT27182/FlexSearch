@@ -10,8 +10,6 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from litellm import aembedding, embedding
-
 from app.core.config import settings
 from app.rag.embedding.local import LocalEmbeddingBackend
 from app.services.litellm_config import (
@@ -19,6 +17,8 @@ from app.services.litellm_config import (
     graphrag_embedding_endpoint,
     vector_embedding_endpoint,
 )
+from litellm import aembedding, embedding  # after litellm_config installs AWS-preload filter
+
 from app.services.model_ids import extract_litellm_provider, is_local_embedding_model
 from app.utils.logger import create_logger
 

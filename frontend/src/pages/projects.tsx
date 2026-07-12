@@ -16,7 +16,7 @@ import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardConten
 import { formatRelativeTime, cn } from '@/lib/utils';
 
 const PROJECT_MODE_HELP: Record<ProjectMode, string> = {
-  vector: 'Classic chunk + embed + vector search via Qdrant.',
+  vector: 'Classic chunk + embed + vector search via OpenSearch.',
   graph_neo4j:
     'Per-document entity extraction into Neo4j. Good for local, incremental graph indexing.',
   graph_microsoft:
@@ -134,7 +134,7 @@ export function ProjectsPage() {
                   value={projectMode}
                   onChange={(e) => handleProjectModeChange(e.target.value as ProjectMode)}
                 >
-                  <option value="vector">Traditional RAG (Qdrant vectors)</option>
+                  <option value="vector">Traditional RAG (OpenSearch)</option>
                   <option value="graph_neo4j">Graph RAG (Neo4j)</option>
                   <option value="graph_microsoft">Graph RAG (Microsoft GraphRAG)</option>
                 </select>

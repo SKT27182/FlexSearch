@@ -6,12 +6,28 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import get_current_active_user
 from app.db.models import RagMode, User
-from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
+from app.prompts import list_prompt_names
+from app.schemas.rag_config import ChatConfig, GraphRagConfig, VectorRagConfig
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
 VECTOR_RETRIEVAL = ["dense", "bm25", "hybrid", "parent_child"]
 GRAPH_RETRIEVAL = ["graph_local", "graph_global"]
+
+
+def _chat_options() -> dict:
+    return {
+        "defaults": ChatConfig().model_dump(mode="json"),
+        "prompts": list_prompt_names(),
+        "phase2_stages": [
+            "context_window",
+            "memory",
+            "optimization",
+            "multi_query",
+            "multihop",
+            "debug",
+        ],
+    }
 
 
 @router.get("/options")
@@ -22,6 +38,7 @@ async def get_rag_options(
 ) -> dict:
     mode = rag_mode or "vector"
     backend = graph_backend or "neo4j"
+    chat = _chat_options()
 
     if mode == "graph" and backend == "microsoft":
         defaults = GraphRagConfig.from_settings(graph_backend="microsoft")
@@ -29,7 +46,7 @@ async def get_rag_options(
             "rag_mode": "graph",
             "graph_backend": "microsoft",
             "defaults": defaults.model_dump(mode="json"),
-            "extraction_strategies": ["ocr", "vlm"],
+            "extraction_strategies": ["ocr", "vlm", "docling", "hybrid_pdf"],
             "retrieval_strategies": GRAPH_RETRIEVAL,
             "chunking_strategies": [],
             "reranking_strategies": ["none"],
@@ -46,6 +63,7 @@ async def get_rag_options(
                     "max_context_tokens": 12000,
                 },
             },
+            "chat": chat,
         }
 
     if mode == "graph":
@@ -54,7 +72,7 @@ async def get_rag_options(
             "rag_mode": "graph",
             "graph_backend": "neo4j",
             "defaults": defaults.model_dump(mode="json"),
-            "extraction_strategies": ["ocr", "vlm"],
+            "extraction_strategies": ["ocr", "vlm", "docling", "hybrid_pdf"],
             "retrieval_strategies": GRAPH_RETRIEVAL,
             "chunking_strategies": [],
             "reranking_strategies": ["none"],
@@ -69,13 +87,14 @@ async def get_rag_options(
                 "graph_local": {"max_hops": 2, "top_entities": 10},
                 "graph_global": {"top_passages": 5},
             },
+            "chat": chat,
         }
 
     defaults = VectorRagConfig.from_settings()
     return {
         "rag_mode": "vector",
         "defaults": defaults.model_dump(mode="json"),
-        "extraction_strategies": ["ocr", "vlm"],
+        "extraction_strategies": ["ocr", "vlm", "docling", "hybrid_pdf"],
         "chunking_strategies": [
             "fixed_window",
             "recursive",
@@ -84,13 +103,24 @@ async def get_rag_options(
         ],
         "retrieval_strategies": VECTOR_RETRIEVAL,
         "reranking_strategies": ["none", "cross_encoder"],
+        "hierarchy_retrieval_modes": [
+            "chunks_only",
+            "summaries_first",
+            "mixed",
+        ],
         "chunking_params": {
             "fixed_window": {"chunk_size": 512, "overlap": 50},
-            "recursive": {"chunk_size": 512, "overlap": 50},
+            "recursive": {
+                "chunk_size": 512,
+                "overlap": 50,
+                "preserve_structure": True,
+            },
             "semantic": {
                 "similarity_threshold": 0.5,
                 "min_chunk_size": 100,
                 "max_chunk_size": 1000,
+                "breakpoint_threshold_type": "percentile",
+                "buffer_size": 1,
             },
             "parent_child": {
                 "parent_chunk_size": 1500,
@@ -104,4 +134,6 @@ async def get_rag_options(
             "hybrid": {"rrf_k": 60},
             "parent_child": {},
         },
+        "summaries": defaults.summaries.model_dump(mode="json"),
+        "chat": chat,
     }

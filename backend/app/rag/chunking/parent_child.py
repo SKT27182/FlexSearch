@@ -1,20 +1,31 @@
 """
-FlexSearch Backend - Parent-Child Chunking Strategy
+Parent-child hierarchical chunking via LangChain recursive splitters.
 
-Hierarchical chunking for better context retrieval.
+Parents provide retrieval context; children are the dense-search units.
+Parent/child ID contract is unchanged for OpenSearch + ParentChildRetrieval:
+- parent metadata: ``is_parent``, ``chunk_type=parent``, ``parent_chunk_id``
+- child metadata: ``chunk_type=child``, ``parent_id`` → parent_chunk_id
 """
+
+from __future__ import annotations
 
 import uuid
 from typing import Any
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.rag.chunking.langchain_adapter import documents_to_chunks
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
+_PARENT_SEPARATORS = ["\n\n\n", "\n\n", "\n", ". ", " ", ""]
+_CHILD_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
 
 class ParentChildChunking(BaseChunkingStrategy):
-    """Parent-child hierarchical chunking."""
+    """Parent-child hierarchical chunking (LangChain RecursiveCharacterTextSplitter)."""
 
     def __init__(
         self,
@@ -22,17 +33,28 @@ class ParentChildChunking(BaseChunkingStrategy):
         child_chunk_size: int = 300,
         overlap: int = 50,
     ) -> None:
-        """
-        Initialize parent-child chunking.
-
-        Args:
-            parent_chunk_size: Size of parent (context) chunks
-            child_chunk_size: Size of child (retrieval) chunks
-            overlap: Character overlap between chunks
-        """
         self._parent_size = parent_chunk_size
         self._child_size = child_chunk_size
         self._overlap = overlap
+        # Parents abut (no overlap) so child offsets stay within one parent window.
+        self._parent_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=parent_chunk_size,
+            chunk_overlap=0,
+            length_function=len,
+            separators=_PARENT_SEPARATORS,
+            add_start_index=True,
+            strip_whitespace=True,
+            keep_separator=True,
+        )
+        self._child_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=child_chunk_size,
+            chunk_overlap=overlap,
+            length_function=len,
+            separators=_CHILD_SEPARATORS,
+            add_start_index=True,
+            strip_whitespace=True,
+            keep_separator=True,
+        )
 
     @property
     def name(self) -> str:
@@ -44,107 +66,76 @@ class ParentChildChunking(BaseChunkingStrategy):
         document_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> list[Chunk]:
-        """
-        Create hierarchical parent-child chunks.
-
-        Returns both parent and child chunks. Child chunks reference their
-        parent via parent_id. During retrieval, search on children and
-        return parent content for context.
-        """
         if not text.strip():
             return []
 
-        chunks = []
+        parent_docs = self._parent_splitter.create_documents([text])
+        parents = documents_to_chunks(
+            parent_docs,
+            source_text=text,
+            document_id=document_id,
+            metadata=metadata,
+        )
+
+        result: list[Chunk] = []
         chunk_index = 0
-        text_len = len(text)
-        start = 0
-
-        while start < text_len:
-            # Create parent chunk
-            parent_end = min(start + self._parent_size, text_len)
-
-            # Try to break at paragraph or sentence
-            if parent_end < text_len:
-                for sep in ["\n\n", "\n", ". ", " "]:
-                    last_sep = text.rfind(sep, start, parent_end)
-                    if last_sep > start + (self._parent_size // 2):
-                        parent_end = last_sep + len(sep)
-                        break
-
-            parent_content = text[start:parent_end].strip()
-
-            if not parent_content:
-                start = parent_end
-                continue
-
-            # Generate parent ID
+        for parent in parents:
             parent_id = str(uuid.uuid4())
-
-            # Create parent chunk (marked as parent in metadata)
-            parent_metadata = {
-                **(metadata or {}),
+            parent_meta = {
+                **dict(metadata or {}),
+                **dict(parent.metadata),
                 "is_parent": True,
                 "chunk_type": "parent",
+                "parent_chunk_id": parent_id,
             }
-
             parent_chunk = Chunk(
-                content=parent_content,
+                content=parent.content,
                 document_id=document_id,
                 chunk_index=chunk_index,
-                start_char=start,
-                end_char=parent_end,
-                metadata=parent_metadata,
-                parent_id=None,  # Parents don't have parent
+                start_char=parent.start_char,
+                end_char=parent.end_char,
+                metadata=parent_meta,
+                parent_id=None,
             )
-            # Store parent_id in metadata for reference
-            parent_chunk.metadata["parent_chunk_id"] = parent_id
-            chunks.append(parent_chunk)
+            result.append(parent_chunk)
             chunk_index += 1
 
-            # Create child chunks within the parent
-            child_start = 0
-            while child_start < len(parent_content):
-                child_end = min(child_start + self._child_size, len(parent_content))
-
-                # Try to break at whitespace
-                if child_end < len(parent_content):
-                    last_space = parent_content.rfind(" ", child_start, child_end)
-                    if last_space > child_start:
-                        child_end = last_space
-
-                child_content = parent_content[child_start:child_end].strip()
-
-                if child_content:
-                    child_metadata = {
-                        **(metadata or {}),
-                        "is_parent": False,
-                        "chunk_type": "child",
-                    }
-
-                    child_chunk = Chunk(
-                        content=child_content,
+            child_docs = self._child_splitter.create_documents([parent.content])
+            for child_doc in child_docs:
+                content = (child_doc.page_content or "").strip()
+                if not content:
+                    continue
+                rel_start = int(child_doc.metadata.get("start_index", 0) or 0)
+                # Locate stripped content near relative start inside parent
+                found = parent.content.find(content, max(0, rel_start - 8))
+                if found != -1:
+                    rel_start = found
+                abs_start = parent.start_char + rel_start
+                abs_end = abs_start + len(content)
+                child_meta = {
+                    **dict(metadata or {}),
+                    "is_parent": False,
+                    "chunk_type": "child",
+                }
+                result.append(
+                    Chunk(
+                        content=content,
                         document_id=document_id,
                         chunk_index=chunk_index,
-                        start_char=start + child_start,
-                        end_char=start + child_end,
-                        metadata=child_metadata,
-                        parent_id=parent_id,  # Reference to parent
+                        start_char=abs_start,
+                        end_char=abs_end,
+                        metadata=child_meta,
+                        parent_id=parent_id,
                     )
-                    chunks.append(child_chunk)
-                    chunk_index += 1
-
-                # Move with overlap
-                child_start = child_end - self._overlap
-                if child_start >= child_end:
-                    break
-
-            # Move to next parent
-            start = parent_end
+                )
+                chunk_index += 1
 
         logger.debug(
-            f"Created {len(chunks)} parent-child chunks from document {document_id}"
+            "Created %d parent-child chunks from document %s",
+            len(result),
+            document_id,
         )
-        return chunks
+        return result
 
     def get_parent_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
         """Filter to only parent chunks."""

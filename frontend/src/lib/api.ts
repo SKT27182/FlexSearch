@@ -326,6 +326,294 @@ export const retrievalApi = {
   },
 };
 
+// ============ Chat API ============
+
+export interface ChatCitation {
+  index: number;
+  chunk_id: string;
+  document_id: string;
+  content: string;
+  score: number;
+  filename?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChatQueryRequest {
+  project_id: string;
+  query: string;
+  session_id?: string | null;
+  top_k?: number;
+  overrides?: RetrievalOverrides;
+  persist?: boolean;
+}
+
+export interface ChatQueryResponse {
+  project_id: string;
+  query: string;
+  answer: string;
+  citations: ChatCitation[];
+  retrieval_strategy: string;
+  reranking_strategy: string;
+  session_id?: string | null;
+  turn_id?: string | null;
+  model?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  empty_retrieval: boolean;
+}
+
+export interface ChatSession {
+  id: string;
+  project_id: string;
+  user_id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  turn_count?: number | null;
+}
+
+export interface ChatTurn {
+  id: string;
+  session_id: string;
+  role: string;
+  content: string;
+  citations?: ChatCitation[] | null;
+  retrieval_strategy?: string | null;
+  reranking_strategy?: string | null;
+  model?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  latency_ms?: number | null;
+  created_at: string;
+}
+
+export type ChatStreamHandlers = {
+  onSession?: (sessionId: string) => void;
+  onStatus?: (stage: string) => void;
+  onCitations?: (citations: ChatCitation[], meta: { retrieval_strategy: string; reranking_strategy: string }) => void;
+  onToken?: (token: string) => void;
+  onDebug?: (payload: Record<string, unknown>) => void;
+  onDone?: (payload: Record<string, unknown>) => void;
+  onPersisted?: (sessionId: string, turnId: string) => void;
+  onError?: (detail: string) => void;
+  signal?: AbortSignal;
+};
+
+export const chatApi = {
+  query: async (request: ChatQueryRequest): Promise<ChatQueryResponse> => {
+    const { data } = await api.post<ChatQueryResponse>('/chat/query', request);
+    return data;
+  },
+
+  listSessions: async (projectId: string): Promise<ChatSession[]> => {
+    const { data } = await api.get<{ sessions: ChatSession[]; total: number }>(
+      '/chat/sessions',
+      { params: { project_id: projectId } }
+    );
+    return data.sessions;
+  },
+
+  createSession: async (projectId: string, title?: string): Promise<ChatSession> => {
+    const { data } = await api.post<ChatSession>('/chat/sessions', {
+      project_id: projectId,
+      title,
+    });
+    return data;
+  },
+
+  deleteSession: async (sessionId: string): Promise<void> => {
+    await api.delete(`/chat/sessions/${sessionId}`);
+  },
+
+  listTurns: async (sessionId: string): Promise<ChatTurn[]> => {
+    const { data } = await api.get<{ session_id: string; turns: ChatTurn[] }>(
+      `/chat/sessions/${sessionId}/turns`
+    );
+    return data.turns;
+  },
+
+  stream: async (request: ChatQueryRequest, handlers: ChatStreamHandlers): Promise<void> => {
+    const { fetchEventSource } = await import('@microsoft/fetch-event-source');
+    const token = localStorage.getItem('access_token');
+    await fetchEventSource('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(request),
+      signal: handlers.signal,
+      openWhenHidden: true,
+      onmessage(msg) {
+        if (!msg.data) return;
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(msg.data);
+        } catch {
+          return;
+        }
+        switch (msg.event) {
+          case 'session':
+            if (data.session_id) handlers.onSession?.(String(data.session_id));
+            break;
+          case 'status':
+            if (data.stage) handlers.onStatus?.(String(data.stage));
+            break;
+          case 'citations':
+            handlers.onCitations?.(
+              (data.citations as ChatCitation[]) || [],
+              {
+                retrieval_strategy: String(data.retrieval_strategy || ''),
+                reranking_strategy: String(data.reranking_strategy || ''),
+              }
+            );
+            break;
+          case 'token':
+            if (typeof data.content === 'string') handlers.onToken?.(data.content);
+            break;
+          case 'debug':
+            handlers.onDebug?.(data);
+            break;
+          case 'done':
+            handlers.onDone?.(data);
+            break;
+          case 'persisted':
+            handlers.onPersisted?.(
+              String(data.session_id || ''),
+              String(data.turn_id || '')
+            );
+            break;
+          case 'error':
+            handlers.onError?.(String(data.detail || 'Chat stream error'));
+            break;
+          default:
+            break;
+        }
+      },
+      onerror(err) {
+        handlers.onError?.(err instanceof Error ? err.message : 'Stream failed');
+        throw err;
+      },
+    });
+  },
+};
+
+// ============ Website crawl / bulk / suggestions (Phase 4) ============
+
+export interface JobProgressEvent {
+  event: string;
+  stage?: string;
+  message?: string;
+  progress?: number;
+  pages_found?: number;
+  pages_processed?: number;
+  document_id?: string;
+  document_ids?: string[];
+  documents_succeeded?: number;
+  documents_failed?: number;
+  [key: string]: unknown;
+}
+
+export type JobStreamHandlers = {
+  onSnapshot?: (ev: JobProgressEvent) => void;
+  onProgress?: (ev: JobProgressEvent) => void;
+  onClose?: () => void;
+  onError?: (detail: string) => void;
+  signal?: AbortSignal;
+};
+
+async function streamJobEvents(jobId: string, handlers: JobStreamHandlers): Promise<void> {
+  const { fetchEventSource } = await import('@microsoft/fetch-event-source');
+  const token = localStorage.getItem('access_token');
+  await fetchEventSource(`/api/jobs/${jobId}/events`, {
+    method: 'GET',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    signal: handlers.signal,
+    openWhenHidden: true,
+    onmessage(msg) {
+      if (!msg.data) return;
+      let data: JobProgressEvent;
+      try {
+        data = JSON.parse(msg.data);
+      } catch {
+        return;
+      }
+      if (msg.event === 'snapshot') handlers.onSnapshot?.(data);
+      else if (msg.event === 'progress') handlers.onProgress?.(data);
+      else if (msg.event === 'close') handlers.onClose?.();
+      else if (msg.event === 'error') handlers.onError?.(String(data.detail || 'Job error'));
+    },
+    onerror(err) {
+      handlers.onError?.(err instanceof Error ? err.message : 'Job stream failed');
+      throw err;
+    },
+  });
+}
+
+export const websiteApi = {
+  crawl: async (
+    projectId: string,
+    body: {
+      url: string;
+      max_depth?: number;
+      max_pages?: number;
+      exclude_patterns?: string[];
+    }
+  ): Promise<{ job_id: string; status: string; project_id: string }> => {
+    const { data } = await api.post(`/projects/${projectId}/crawl`, body);
+    return data;
+  },
+  streamJob: streamJobEvents,
+};
+
+export const bulkApi = {
+  importPack: async (
+    projectId: string,
+    file: File
+  ): Promise<{ job_id: string; status: string; project_id: string }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const { data } = await api.post(`/projects/${projectId}/bulk-import`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data;
+  },
+  exportPack: async (projectId: string): Promise<Blob> => {
+    const { data } = await api.get(`/projects/${projectId}/export`, {
+      responseType: 'blob',
+    });
+    return data;
+  },
+  streamJob: streamJobEvents,
+};
+
+export const suggestionsApi = {
+  project: async (projectId: string, count = 5): Promise<string[]> => {
+    const { data } = await api.get<{ questions: string[] }>(
+      `/projects/${projectId}/suggestions`,
+      { params: { count } }
+    );
+    return data.questions;
+  },
+  followup: async (
+    projectId: string,
+    query: string,
+    answer: string,
+    count = 3
+  ): Promise<string[]> => {
+    const { data } = await api.post<{ questions: string[] }>('/chat/suggestions/followup', {
+      project_id: projectId,
+      query,
+      answer,
+      count,
+    });
+    return data.questions;
+  },
+};
+
 // ============ Admin API ============
 
 export interface AdminUserStats {

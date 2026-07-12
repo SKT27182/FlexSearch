@@ -50,7 +50,8 @@ def test_factory_recursive() -> None:
 
 def test_rag_config_from_settings_shape() -> None:
     cfg = VectorRagConfig.from_settings()
-    assert cfg.extraction.strategy in ("ocr", "vlm")
+    assert cfg.extraction.strategy in ("ocr", "vlm", "docling", "hybrid_pdf")
+    assert cfg.summaries.retrieval_mode == "chunks_only"
     assert cfg.chunking.strategy in (
         "fixed_window",
         "recursive",
@@ -78,11 +79,13 @@ def test_effective_rag_config_top_k_override_wins() -> None:
 
 
 def test_bm25_retrieval_factory() -> None:
+    """Factory stores k1/b for schema compat; OpenSearch ignores them at search time."""
     r = build_retrieval_strategy(
         RetrievalConfig(strategy="bm25", params={"k1": 1.2, "b": 0.8})
     )
     assert isinstance(r, SparseRetrieval)
     assert r.name == "bm25"
+    # Retained on the instance for config round-trip only (not passed to OpenSearch).
     assert r._k1 == 1.2
     assert r._b == 0.8
 
@@ -100,6 +103,27 @@ def test_microsoft_graph_local_retrieval_factory() -> None:
     r = build_graph_retrieval_strategy(cfg)
     assert isinstance(r, GraphLocalRetrieval)
     assert r.name == "graph_local"
+    assert r._graph_backend == "microsoft"
+
+
+def test_graph_effective_config_preserves_microsoft_backend() -> None:
+    """GraphEffectiveRagConfig must carry graph_backend into the factory."""
+    from app.schemas.rag_config import GraphEffectiveRagConfig
+
+    project = GraphRagConfig.from_settings(graph_backend="microsoft")
+    effective = GraphEffectiveRagConfig.for_retrieval(project, None, top_k=5)
+    assert effective.graph_backend == "microsoft"
+    r = build_graph_retrieval_strategy(effective)
+    assert r._graph_backend == "microsoft"
+
+
+def test_bare_graph_retrieval_config_defaults_to_neo4j() -> None:
+    """Passing only GraphRetrievalConfig still defaults to neo4j (legacy path)."""
+    r = build_graph_retrieval_strategy(
+        GraphRetrievalConfig(strategy="graph_local", params={"max_hops": 2})
+    )
+    assert isinstance(r, GraphLocalRetrieval)
+    assert r._graph_backend == "neo4j"
 
 
 def test_neo4j_graph_retrieval_factory() -> None:
@@ -113,6 +137,7 @@ def test_neo4j_graph_retrieval_factory() -> None:
     )
     assert isinstance(r, GraphLocalRetrieval)
     assert r.name == "graph_local"
+    assert r._graph_backend == "neo4j"
 
 
 def test_parse_rag_config_modes() -> None:

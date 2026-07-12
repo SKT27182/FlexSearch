@@ -6,16 +6,16 @@ from uuid import UUID
 
 from app.services.graphrag_workspace import graphrag_storage_prefix
 from app.services.neo4j_store import get_neo4j_store
+from app.services.search_store import get_search_store
 from app.services.storage import get_storage_service
-from app.services.vector_store import get_vector_store
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
 
 def wipe_vector_index(project_id: UUID | str) -> None:
-    get_vector_store().delete_by_project(str(project_id))
-    logger.info("Wiped Qdrant vectors for project %s", project_id)
+    get_search_store().delete_by_project(str(project_id))
+    logger.info("Wiped OpenSearch vectors for project %s", project_id)
 
 
 def wipe_graph_workspace(project_id: UUID | str) -> None:
@@ -26,7 +26,7 @@ def wipe_graph_workspace(project_id: UUID | str) -> None:
 
 
 def wipe_neo4j_graph(project_id: UUID | str) -> None:
-    get_neo4j_store().delete_project_graph(str(project_id))
+    get_neo4j_store().delete_project_subgraph(str(project_id))
     logger.info("Wiped Neo4j graph for project %s", project_id)
 
 

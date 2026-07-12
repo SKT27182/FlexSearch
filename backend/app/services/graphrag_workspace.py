@@ -424,6 +424,7 @@ class GraphRAGWorkspace:
         project_id: UUID,
         *,
         is_update: bool = False,
+        manage_in_flight: bool = True,
     ) -> None:
         if not settings.graph_indexing_enabled:
             logger.info("Graph indexing disabled globally; skip project %s", project_id)
@@ -432,19 +433,22 @@ class GraphRAGWorkspace:
         # Per-project concurrency guard: a second build for the same project
         # (e.g. from a debounce race after two documents finish) must not run
         # while one is already in flight.
+        # When called from Celery rebuild_graph_index_task, the task already
+        # holds _in_flight — pass manage_in_flight=False to avoid a no-op skip.
         from app.services.graph_index_tasks import (
             _acquire_in_flight,
             _release_in_flight,
-            is_graph_index_in_flight,
         )
 
-        if is_graph_index_in_flight(project_id):
-            logger.info(
-                "Skipping GraphRAG build for project %s; another build is in flight",
-                project_id,
-            )
-            return
-        acquired = _acquire_in_flight(project_id)
+        acquired = False
+        if manage_in_flight:
+            acquired = _acquire_in_flight(project_id)
+            if not acquired:
+                logger.info(
+                    "Skipping GraphRAG build for project %s; another build is in flight",
+                    project_id,
+                )
+                return
 
         root: Path | None = None
         start_ts = time.monotonic()
@@ -469,6 +473,7 @@ class GraphRAGWorkspace:
                     backend="microsoft",
                     status="indexing",
                     fingerprint=rag_config.graph_indexing_fingerprint(),
+                    indexing_started_at=datetime.now(timezone.utc),
                     error=None,
                 )
                 project.graph_index_status = state.to_db()

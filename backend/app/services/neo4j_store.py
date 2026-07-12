@@ -13,7 +13,12 @@ from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
-EMBEDDING_DIMENSION = 384
+
+def _embedding_dimension() -> int:
+    """Resolve vector dimension from the active embedding model."""
+    from app.services.embedding import get_embedding_service
+
+    return get_embedding_service().dimension
 
 
 class Neo4jStoreError(Exception):
@@ -80,6 +85,7 @@ class Neo4jStore:
             ) from exc
 
     def ensure_schema(self) -> None:
+        dim = _embedding_dimension()
         statements = [
             """
             CREATE CONSTRAINT project_id_unique IF NOT EXISTS
@@ -105,14 +111,6 @@ class Neo4jStore:
             CREATE FULLTEXT INDEX entity_search IF NOT EXISTS
             FOR (e:Entity) ON EACH [e.name, e.description]
             """,
-            f"""
-            CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
-            FOR (e:Entity) ON (e.embedding)
-            OPTIONS {{indexConfig: {{
-              `vector.dimensions`: {EMBEDDING_DIMENSION},
-              `vector.similarity_function`: 'cosine'
-            }}}}
-            """,
         ]
         with self._get_driver().session() as session:
             for stmt in statements:
@@ -124,6 +122,105 @@ class Neo4jStore:
                     if "An equivalent index already exists" in str(exc):
                         continue
                     logger.warning("Neo4j schema statement skipped: %s", exc)
+            self._ensure_entity_vector_index(session, dim)
+
+    def _vector_index_dimensions(self, session: Any, index_name: str) -> int | None:
+        """Return configured vector.dimensions for an index, or None if missing."""
+        try:
+            record = session.run(
+                """
+                SHOW INDEXES
+                YIELD name, type, options
+                WHERE name = $name AND type = 'VECTOR'
+                RETURN options
+                """,
+                name=index_name,
+            ).single()
+        except Neo4jError as exc:
+            logger.debug("SHOW INDEXES failed for %s: %s", index_name, exc)
+            return None
+        if not record:
+            return None
+        options = record.get("options") or {}
+        if not isinstance(options, dict):
+            return None
+        index_config = options.get("indexConfig") or options.get("index_config") or {}
+        if not isinstance(index_config, dict):
+            return None
+        raw = index_config.get("vector.dimensions")
+        if raw is None:
+            raw = index_config.get("`vector.dimensions`")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _ensure_entity_vector_index(self, session: Any, dim: int) -> None:
+        """Create or recreate entity_embedding when dimension mismatches.
+
+        IF NOT EXISTS alone leaves a stale index after embedding model changes.
+        On mismatch we drop the index, clear stored embeddings (wrong width),
+        and recreate — callers must re-run graph indexing to refill vectors.
+        """
+        index_name = "entity_embedding"
+        existing_dim = self._vector_index_dimensions(session, index_name)
+        if existing_dim == dim:
+            return
+
+        if existing_dim is not None:
+            logger.warning(
+                "Neo4j vector index %s dimension mismatch (%s -> %s); "
+                "recreating index and clearing entity embeddings. "
+                "Re-run graph indexing to restore vectors.",
+                index_name,
+                existing_dim,
+                dim,
+            )
+            try:
+                session.run(f"DROP INDEX {index_name} IF EXISTS")
+            except Neo4jError as exc:
+                raise Neo4jStoreError(
+                    f"Failed to drop stale vector index {index_name} "
+                    f"(dim {existing_dim} -> {dim}): {exc}"
+                ) from exc
+            try:
+                session.run(
+                    """
+                    MATCH (e:Entity)
+                    WHERE e.embedding IS NOT NULL
+                    SET e.embedding = null
+                    """
+                )
+            except Neo4jError as exc:
+                logger.warning(
+                    "Could not clear stale entity embeddings after dimension change: %s",
+                    exc,
+                )
+
+        create_stmt = f"""
+            CREATE VECTOR INDEX {index_name} IF NOT EXISTS
+            FOR (e:Entity) ON (e.embedding)
+            OPTIONS {{indexConfig: {{
+              `vector.dimensions`: {dim},
+              `vector.similarity_function`: 'cosine'
+            }}}}
+            """
+        try:
+            session.run(create_stmt.strip())
+        except Neo4jError as exc:
+            if "EquivalentSchemaRuleAlreadyExists" in str(exc):
+                return
+            if "An equivalent index already exists" in str(exc):
+                # Exists with unknown/other config — fail clearly rather than
+                # silently querying with the wrong dimension.
+                raise Neo4jStoreError(
+                    f"Vector index {index_name} already exists but dimension "
+                    f"could not be verified against embedding dim={dim}. "
+                    f"Drop the index manually or fix Neo4j SHOW INDEXES access: {exc}"
+                ) from exc
+            raise Neo4jStoreError(
+                f"Failed to create vector index {index_name} (dim={dim}): {exc}"
+            ) from exc
 
     def upsert_project(self, project_id: str, name: str = "") -> None:
         with self._get_driver().session() as session:
@@ -208,10 +305,14 @@ class Neo4jStore:
         entity_id: str,
     ) -> None:
         with self._get_driver().session() as session:
+            # OPTIONAL MATCH: if a concurrent delete wiped the passage/entity,
+            # no-op instead of Neo4j EntityNotFound on stale element ids.
             session.run(
                 """
-                MATCH (p:Passage {passage_id: $passage_id, project_id: $project_id})
-                MATCH (e:Entity {entity_id: $entity_id, project_id: $project_id})
+                OPTIONAL MATCH (p:Passage {passage_id: $passage_id, project_id: $project_id})
+                OPTIONAL MATCH (e:Entity {entity_id: $entity_id, project_id: $project_id})
+                WITH p, e
+                WHERE p IS NOT NULL AND e IS NOT NULL
                 MERGE (p)-[:MENTIONS]->(e)
                 """,
                 project_id=project_id,
@@ -227,8 +328,10 @@ class Neo4jStore:
         with self._get_driver().session() as session:
             session.run(
                 """
-                MATCH (a:Entity {entity_id: $source_id, project_id: $project_id})
-                MATCH (b:Entity {entity_id: $target_id, project_id: $project_id})
+                OPTIONAL MATCH (a:Entity {entity_id: $source_id, project_id: $project_id})
+                OPTIONAL MATCH (b:Entity {entity_id: $target_id, project_id: $project_id})
+                WITH a, b
+                WHERE a IS NOT NULL AND b IS NOT NULL
                 MERGE (a)-[r:RELATES_TO {type: $rel_type}]->(b)
                 SET r.description = $description
                 """,

@@ -6,9 +6,13 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.models import Document, DocumentStatus
 from app.services.document_events import publish_document_status, status_payload_from_document
+from app.utils.logger import create_logger
+
+logger = create_logger(__name__)
 
 
 async def update_document_status(
@@ -24,7 +28,8 @@ async def update_document_status(
     extraction_config_hash: str | None = None,
     extracted_at: datetime | None = None,
     clear_error: bool = False,
-) -> None:
+) -> bool:
+    """Persist status. Returns False if the document row was deleted concurrently."""
     document.status = status
     if processing_step is not None:
         document.processing_step = processing_step
@@ -45,9 +50,19 @@ async def update_document_status(
     if status == DocumentStatus.COMPLETED:
         document.processed_at = datetime.now(timezone.utc)
 
-    await db.commit()
-    await db.refresh(document)
+    try:
+        await db.commit()
+        await db.refresh(document)
+    except StaleDataError:
+        await db.rollback()
+        logger.info(
+            "Document %s missing on status update to %s (deleted concurrently)",
+            document.id,
+            status,
+        )
+        return False
     await publish_document_status(status_payload_from_document(document))
+    return True
 
 
 async def get_document(db: AsyncSession, document_id: UUID) -> Document | None:

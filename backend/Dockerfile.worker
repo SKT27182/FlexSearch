@@ -1,0 +1,25 @@
+# =============================================================================
+# FlexSearch Celery Worker - Dockerfile
+# =============================================================================
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    poppler-utils \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv pip install --system -e .
+
+COPY . .
+
+# Default: all Phase 0 queues (ingest/graph/summary/default)
+ENV CELERY_QUEUES=ingest,graph,summary,default
+ENV CELERY_CONCURRENCY=2
+
+CMD ["sh", "-c", "celery -A app.celery_app worker --loglevel=INFO -Q ${CELERY_QUEUES} --concurrency=${CELERY_CONCURRENCY}"]

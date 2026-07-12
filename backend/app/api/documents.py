@@ -26,11 +26,15 @@ from app.services.document_storage import (
     extracted_meta_key,
     raw_object_key,
 )
-from app.services.document_tasks import schedule_process_document
+from app.services.document_tasks import (
+    cancel_document_ingest,
+    schedule_process_document,
+)
 from app.services.project_access import user_can_access_project
 from app.services.storage import get_storage_service
 from app.rag.pipeline import create_pipeline
 from app.services.document_worker import get_project_rag_context
+from app.services.summary_tasks import cancel_document_summary
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -88,6 +92,7 @@ async def upload_document(
         "application/pdf",
         "text/plain",
         "text/markdown",
+        "text/html",
         "image/png",
         "image/jpeg",
         "image/jpg",
@@ -350,6 +355,10 @@ async def delete_document(
                 logger.error("Failed to delete %s: %s", path, e)
 
     try:
+        # Stop ingest before wiping Neo4j/OpenSearch so the worker cannot race
+        # delete_document_subgraph (EntityNotFound / stuck at 75%).
+        cancel_document_ingest(document.id)
+        cancel_document_summary(document.id)
         rag_mode, rag_config, _ = await get_project_rag_context(db, project_id)
         create_pipeline(rag_config, rag_mode=rag_mode).delete_document_data(
             str(document.id), project_id=str(project_id)

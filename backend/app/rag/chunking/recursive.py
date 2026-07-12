@@ -1,48 +1,64 @@
 """
-FlexSearch Backend - Recursive Chunking Strategy
+Recursive chunking via LangChain ``RecursiveCharacterTextSplitter``.
 
-Structure-aware recursive text splitting.
+When ``preserve_structure=True``, fenced code blocks and markdown pipe tables
+are extracted as atomic units (never mid-split) before prose is handed to the
+LangChain recursive splitter — same contract as the previous custom
+implementation, backed by LangChain for the scalable recursive path.
 """
 
-import re
+from __future__ import annotations
+
 from typing import Any
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.rag.chunking.langchain_adapter import (
+    documents_to_chunks,
+    split_preserving_structure,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
+# Prefer larger structural breaks first (LangChain defaults + FlexSearch extras)
+DEFAULT_SEPARATORS = [
+    "\n\n\n",
+    "\n\n",
+    "\n",
+    ". ",
+    ", ",
+    " ",
+    "",
+]
+
 
 class RecursiveChunking(BaseChunkingStrategy):
-    """Recursive text splitting with hierarchical separators."""
-
-    DEFAULT_SEPARATORS = [
-        "\n\n\n",  # Multiple newlines (major sections)
-        "\n\n",  # Paragraph breaks
-        "\n",  # Line breaks
-        ". ",  # Sentences
-        ", ",  # Clauses
-        " ",  # Words
-        "",  # Characters (fallback)
-    ]
+    """Recursive text splitting with hierarchical separators (LangChain)."""
 
     def __init__(
         self,
         chunk_size: int = 512,
         overlap: int = 50,
         separators: list[str] | None = None,
+        *,
+        preserve_structure: bool = True,
     ) -> None:
-        """
-        Initialize recursive chunking.
-
-        Args:
-            chunk_size: Target chunk size in characters
-            overlap: Character overlap between chunks
-            separators: Ordered list of separators to try
-        """
         self._chunk_size = chunk_size
         self._overlap = overlap
-        self._separators = separators or self.DEFAULT_SEPARATORS
+        self._separators = separators or DEFAULT_SEPARATORS
+        self._preserve_structure = preserve_structure
+        self._splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=overlap,
+            length_function=len,
+            separators=self._separators,
+            is_separator_regex=False,
+            add_start_index=True,
+            strip_whitespace=True,
+            keep_separator=True,
+        )
 
     @property
     def name(self) -> str:
@@ -54,101 +70,97 @@ class RecursiveChunking(BaseChunkingStrategy):
         document_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> list[Chunk]:
-        """Split text recursively using hierarchical separators."""
         if not text.strip():
             return []
 
-        chunks = self._split_recursive(text, self._separators)
-
-        # Merge small chunks and split large ones
-        merged = self._merge_chunks(chunks)
-
-        # Create Chunk objects
-        result = []
-        current_pos = 0
-
-        for idx, chunk_text in enumerate(merged):
-            chunk_text = chunk_text.strip()
-            if not chunk_text:
-                continue
-
-            start = text.find(chunk_text, current_pos)
-            if start == -1:
-                start = current_pos
-            end = start + len(chunk_text)
-
-            result.append(
-                Chunk(
-                    content=chunk_text,
-                    document_id=document_id,
-                    chunk_index=idx,
-                    start_char=start,
-                    end_char=end,
-                    metadata=metadata or {},
-                )
+        if self._preserve_structure:
+            chunks = self._chunk_with_structure(text, document_id, metadata)
+        else:
+            docs = self._splitter.create_documents([text])
+            chunks = documents_to_chunks(
+                docs,
+                source_text=text,
+                document_id=document_id,
+                metadata=metadata,
             )
-            current_pos = start + 1
 
-        logger.debug(f"Created {len(result)} chunks from document {document_id}")
-        return result
+        logger.debug(
+            "Created %d recursive chunks from document %s",
+            len(chunks),
+            document_id,
+        )
+        return chunks
 
-    def _split_recursive(
+    def _chunk_with_structure(
         self,
         text: str,
-        separators: list[str],
-    ) -> list[str]:
-        """Recursively split text using separators."""
-        if not separators:
-            return [text] if text else []
-
-        separator = separators[0]
-        remaining_separators = separators[1:]
-
-        if not separator:
-            # Character-level split
-            return list(text)
-
-        # Split by current separator
-        parts = text.split(separator)
-
-        result = []
-        for part in parts:
-            if len(part) <= self._chunk_size:
-                result.append(part)
-            else:
-                # Part is too large, split with next separator
-                result.extend(self._split_recursive(part, remaining_separators))
-
-        return result
-
-    def _merge_chunks(self, chunks: list[str]) -> list[str]:
-        """Merge small chunks and ensure proper sizing."""
-        if not chunks:
-            return []
-
-        result = []
-        current = ""
-
-        for chunk in chunks:
-            if not chunk.strip():
+        document_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> list[Chunk]:
+        """Prose → RecursiveCharacterTextSplitter; code/tables stay atomic."""
+        result: list[Chunk] = []
+        cursor = 0
+        for segment, structure_type in split_preserving_structure(text):
+            if structure_type is not None:
+                content = segment.strip()
+                if not content:
+                    continue
+                start = text.find(content, cursor)
+                if start == -1:
+                    start = cursor
+                end = start + len(content)
+                meta = dict(metadata or {})
+                meta["structure_type"] = structure_type
+                # Oversized atoms: fall back to hard recursive split still via LC
+                if len(content) > self._chunk_size * 2:
+                    docs = self._splitter.create_documents([content])
+                    sub = documents_to_chunks(
+                        docs,
+                        source_text=content,
+                        document_id=document_id,
+                        metadata=metadata,
+                        extra_meta={"structure_type": structure_type},
+                    )
+                    for sub_chunk in sub:
+                        sub_chunk.start_char += start
+                        sub_chunk.end_char += start
+                        result.append(sub_chunk)
+                else:
+                    result.append(
+                        Chunk(
+                            content=content,
+                            document_id=document_id,
+                            chunk_index=0,
+                            start_char=start,
+                            end_char=end,
+                            metadata=meta,
+                        )
+                    )
+                cursor = max(cursor, start + 1)
                 continue
 
-            if len(current) + len(chunk) + 1 <= self._chunk_size:
-                current = f"{current} {chunk}".strip() if current else chunk
+            # Prose segment — relative start_index from LC must be offset
+            abs_offset = text.find(segment, cursor)
+            if abs_offset == -1:
+                abs_offset = cursor
+            docs = self._splitter.create_documents([segment])
+            for doc in docs:
+                if "start_index" in (doc.metadata or {}):
+                    doc.metadata["start_index"] = (
+                        abs_offset + int(doc.metadata["start_index"])
+                    )
+            prose_chunks = documents_to_chunks(
+                docs,
+                source_text=text,
+                document_id=document_id,
+                metadata=metadata,
+            )
+            result.extend(prose_chunks)
+            if prose_chunks:
+                cursor = max(cursor, prose_chunks[-1].end_char)
             else:
-                if current:
-                    result.append(current)
+                cursor = abs_offset + len(segment)
 
-                # If chunk itself is too large, split it
-                if len(chunk) > self._chunk_size:
-                    # Simple split at chunk_size
-                    for i in range(0, len(chunk), self._chunk_size - self._overlap):
-                        result.append(chunk[i : i + self._chunk_size])
-                    current = ""
-                else:
-                    current = chunk
-
-        if current:
-            result.append(current)
-
+        for i, chunk in enumerate(result):
+            chunk.chunk_index = i
         return result

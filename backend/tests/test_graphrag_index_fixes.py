@@ -3,6 +3,7 @@ wait-for-all-documents scheduling gate."""
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -54,7 +55,7 @@ async def test_reconcile_interrupted_graph_indexes_marks_indexing_as_failed(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A GRAPH project left at 'indexing' is reset to 'failed' on startup."""
+    """A GRAPH project left at 'indexing' with a dead task is reset on startup."""
     pid = uuid4()
 
     def _session_maker():
@@ -68,6 +69,7 @@ async def test_reconcile_interrupted_graph_indexes_marks_indexing_as_failed(
         return _Ctx()
 
     monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_graph_rebuild_alive", lambda _pid: False)
 
     project = Project(
         id=pid,
@@ -90,6 +92,47 @@ async def test_reconcile_interrupted_graph_indexes_marks_indexing_as_failed(
     assert state.status == "failed"
     assert state.backend == "microsoft"
     assert "interrupted" in (state.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_interrupted_leaves_live_celery_build_alone(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup reconcile must not fail projects whose Celery rebuild is alive."""
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_graph_rebuild_alive", lambda _pid: True)
+
+    project = Project(
+        id=pid,
+        name="Live Graph Build",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft", status="indexing"
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    count = await tasks.reconcile_interrupted_graph_indexes()
+
+    assert count == 0
+    await db_session.refresh(project)
+    assert GraphIndexState.from_db(project.graph_index_status).status == "indexing"
 
 
 @pytest.mark.asyncio
@@ -130,6 +173,305 @@ async def test_reconcile_leaves_non_indexing_statuses_alone(
     await db_session.refresh(project)
     state = GraphIndexState.from_db(project.graph_index_status)
     assert state.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_graph_index_when_celery_task_dead(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status poll recovers stuck 'indexing' without API restart when task is dead."""
+    from datetime import datetime, timezone
+
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_graph_rebuild_alive", lambda _pid: False)
+
+    project = Project(
+        id=pid,
+        name="Stuck Mid-Build",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft",
+            status="indexing",
+            indexing_started_at=datetime.now(timezone.utc),
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    assert await tasks.reconcile_stale_graph_index(pid) is True
+    await db_session.refresh(project)
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "failed"
+    assert "no longer running" in (state.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_leaves_alive_indexing_alone(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_graph_rebuild_alive", lambda _pid: True)
+
+    project = Project(
+        id=pid,
+        name="Active Build",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft",
+            status="indexing",
+            indexing_started_at=datetime.now(timezone.utc),
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    assert await tasks.reconcile_stale_graph_index(pid) is False
+    await db_session.refresh(project)
+    assert GraphIndexState.from_db(project.graph_index_status).status == "indexing"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_neo4j_when_ingest_tasks_dead(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neo4j path recovers promptly via ingest-task alive check, not only timeout."""
+    from datetime import datetime, timezone
+
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    async def _neo4j_dead(_pid, *, db=None):
+        return False
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_neo4j_graph_indexing_alive", _neo4j_dead)
+
+    project = Project(
+        id=pid,
+        name="Stuck Neo4j",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "neo4j"},
+        graph_index_status=GraphIndexState(
+            backend="neo4j",
+            status="indexing",
+            indexing_started_at=datetime.now(timezone.utc),
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    assert await tasks.reconcile_stale_graph_index(pid) is True
+    await db_session.refresh(project)
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "failed"
+    assert "no longer running" in (state.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_neo4j_leaves_alive_ingest_alone(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    async def _neo4j_alive(_pid, *, db=None):
+        return True
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "is_neo4j_graph_indexing_alive", _neo4j_alive)
+
+    project = Project(
+        id=pid,
+        name="Active Neo4j",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "neo4j"},
+        graph_index_status=GraphIndexState(
+            backend="neo4j",
+            status="indexing",
+            indexing_started_at=datetime.now(timezone.utc),
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    assert await tasks.reconcile_stale_graph_index(pid) is False
+    await db_session.refresh(project)
+    assert GraphIndexState.from_db(project.graph_index_status).status == "indexing"
+
+
+def test_is_graph_rebuild_alive_false_on_terminal_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    pid = uuid4()
+    tasks._in_flight.discard(str(pid))
+
+    existing = MagicMock()
+    existing.state = "FAILURE"
+
+    mock_task = MagicMock()
+    mock_task.app = MagicMock()
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch("app.services.graph_index_tasks.AsyncResult", return_value=existing),
+    ):
+        assert tasks.is_graph_rebuild_alive(pid) is False
+
+
+def test_is_graph_rebuild_alive_detects_orphaned_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STARTED in result backend but no worker owns the task → dead."""
+    pid = uuid4()
+    tasks._in_flight.discard(str(pid))
+
+    existing = MagicMock()
+    existing.state = "STARTED"
+
+    insp = MagicMock()
+    insp.active.return_value = {"worker@host": []}
+    insp.reserved.return_value = {"worker@host": []}
+    insp.scheduled.return_value = {"worker@host": []}
+
+    mock_app = MagicMock()
+    mock_app.control.inspect.return_value = insp
+    mock_task = MagicMock()
+    mock_task.app = mock_app
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch("app.services.graph_index_tasks.AsyncResult", return_value=existing),
+    ):
+        assert tasks.is_graph_rebuild_alive(pid) is False
+
+
+def test_schedule_graph_rebuild_coalesces_received() -> None:
+    """RECEIVED is in-flight — do not enqueue a duplicate rebuild."""
+    pid = uuid4()
+    task_id = tasks.graph_rebuild_task_id(pid)
+
+    existing = MagicMock()
+    existing.state = "RECEIVED"
+
+    mock_task = MagicMock()
+    mock_task.app = MagicMock()
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch("app.services.celery_schedule.AsyncResult", return_value=existing),
+    ):
+        result = tasks.schedule_graph_index_rebuild(pid)
+
+    assert result == task_id
+    mock_task.apply_async.assert_not_called()
+
+
+def test_schedule_graph_rebuild_coalesces_started() -> None:
+    pid = uuid4()
+    task_id = tasks.graph_rebuild_task_id(pid)
+
+    existing = MagicMock()
+    existing.state = "STARTED"
+
+    mock_task = MagicMock()
+    mock_task.app = MagicMock()
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch("app.services.celery_schedule.AsyncResult", return_value=existing),
+    ):
+        result = tasks.schedule_graph_index_rebuild(pid)
+
+    assert result == task_id
+    mock_task.apply_async.assert_not_called()
+
+
+def test_schedule_graph_rebuild_replaces_pending() -> None:
+    """Unknown PENDING (first schedule) must enqueue without revoke."""
+    pid = uuid4()
+    task_id = tasks.graph_rebuild_task_id(pid)
+
+    existing = MagicMock()
+    existing.state = "PENDING"
+
+    async_result = MagicMock()
+    async_result.id = task_id
+
+    mock_task = MagicMock()
+    mock_task.app = MagicMock()
+    mock_task.apply_async.return_value = async_result
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch("app.services.celery_schedule.AsyncResult", return_value=existing),
+        patch(
+            "app.services.celery_schedule.celery_task_known_to_workers",
+            return_value=False,
+        ),
+    ):
+        result = tasks.schedule_graph_index_rebuild(pid, debounce_seconds=1.0)
+
+    assert result == task_id
+    mock_task.app.control.revoke.assert_not_called()
+    mock_task.apply_async.assert_called_once()
+    kwargs = mock_task.apply_async.call_args.kwargs
+    assert kwargs["task_id"] == task_id
+    assert kwargs["queue"] == "graph"
+    assert kwargs["countdown"] == 1.0
 
 
 @pytest.mark.asyncio

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import litellm
+import logging
+
 import pytest
 
 from app.core.config import Settings
 from app.services.litellm_config import (
     LiteLLMEndpoint,
+    _SuppressOptionalAwsPreload,
     configure_litellm,
     graphrag_embedding_endpoint,
     llm_endpoint,
     vector_embedding_endpoint,
 )
+import litellm  # after litellm_config installs AWS-preload filter
+
 
 
 def test_vector_embedding_endpoint_local_when_no_key(
@@ -163,6 +167,39 @@ def test_configure_litellm_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert litellm.set_verbose is True
     configure_litellm()
     assert litellm.set_verbose is True
+
+
+def test_optional_aws_preload_filter_installed() -> None:
+    logger = logging.getLogger("LiteLLM")
+    assert any(isinstance(f, _SuppressOptionalAwsPreload) for f in logger.filters)
+
+
+def test_optional_aws_preload_filter_drops_botocore_noise() -> None:
+    filt = _SuppressOptionalAwsPreload()
+    drop = logging.LogRecord(
+        name="LiteLLM",
+        level=logging.WARNING,
+        pathname="",
+        lineno=0,
+        msg=(
+            "litellm: could not pre-load bedrock-runtime response stream shape "
+            "— Bedrock event-stream decoding will be unavailable. "
+            "Error: No module named 'botocore'"
+        ),
+        args=(),
+        exc_info=None,
+    )
+    keep = logging.LogRecord(
+        name="LiteLLM",
+        level=logging.WARNING,
+        pathname="",
+        lineno=0,
+        msg="rate limit exceeded for model gpt-4o-mini",
+        args=(),
+        exc_info=None,
+    )
+    assert filt.filter(drop) is False
+    assert filt.filter(keep) is True
 
 
 def test_litellm_endpoint_dataclass() -> None:

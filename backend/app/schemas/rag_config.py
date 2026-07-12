@@ -19,8 +19,22 @@ GraphBackend = Literal["neo4j", "microsoft"]
 AllRetrievalStrategy = Union[VectorRetrievalStrategy, GraphRetrievalStrategy]
 
 
+class PreprocessConfig(BaseModel):
+    """Post-extract text cleanup (Phase 3)."""
+
+    enabled: bool = True
+    fix_encoding: bool = True
+    normalize_whitespace: bool = True
+    strip_headers_footers: bool = True
+
+
 class ExtractionConfig(BaseModel):
-    strategy: Literal["ocr", "vlm"] = "ocr"
+    strategy: Literal["ocr", "vlm", "docling", "hybrid_pdf"] = "ocr"
+    preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
+    extract_hierarchy: bool = Field(
+        default=True,
+        description="Attach heading_path / section_title metadata to chunks",
+    )
 
 
 class FixedWindowChunkingParams(BaseModel):
@@ -31,12 +45,28 @@ class FixedWindowChunkingParams(BaseModel):
 class RecursiveChunkingParams(BaseModel):
     chunk_size: int = Field(default=512, ge=64, le=8192)
     overlap: int = Field(default=50, ge=0, le=1024)
+    preserve_structure: bool = Field(
+        default=True,
+        description="Keep markdown tables/code fences as atomic units",
+    )
 
 
 class SemanticChunkingParams(BaseModel):
+    """
+    LangChain ``SemanticChunker`` params.
+
+    ``similarity_threshold`` maps to breakpoint distance sensitivity
+    (higher → fewer breaks). Optional ``breakpoint_threshold_type`` selects
+    the LangChain breakpoint strategy.
+    """
+
     similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     min_chunk_size: int = Field(default=100, ge=32, le=4096)
     max_chunk_size: int = Field(default=1000, ge=128, le=16384)
+    breakpoint_threshold_type: Literal[
+        "percentile", "standard_deviation", "interquartile", "gradient"
+    ] = "percentile"
+    buffer_size: int = Field(default=1, ge=1, le=10)
 
 
 class ParentChildChunkingParams(BaseModel):
@@ -76,6 +106,35 @@ class Bm25RetrievalParams(BaseModel):
     b: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
+HierarchyRetrievalMode = Literal["chunks_only", "summaries_first", "mixed"]
+
+
+class HierarchicalSummaryConfig(BaseModel):
+    """
+    Hierarchical summaries for vector mode (Phase 3).
+
+    OpenSearch is the retrieval source of truth (``summary_level`` +
+    ``member_chunk_ids``). Skipped automatically for Microsoft GraphRAG projects.
+    """
+
+    enabled: bool = True
+    retrieval_mode: HierarchyRetrievalMode = "chunks_only"
+    min_chunks: int = Field(
+        default=6,
+        ge=2,
+        le=10_000,
+        description="Skip summary job when document has fewer chunks",
+    )
+    n_clusters: int | None = Field(
+        default=None,
+        ge=2,
+        le=200,
+        description="K-Means cluster count; None → auto (≈ sqrt(n_chunks))",
+    )
+    cluster_max_tokens: int = Field(default=512, ge=64, le=4096)
+    manifesto_max_tokens: int = Field(default=1024, ge=128, le=8192)
+
+
 class RetrievalConfig(BaseModel):
     strategy: VectorRetrievalStrategy = "dense"
     params: dict[str, Any] = Field(default_factory=dict)
@@ -95,11 +154,66 @@ class RerankingConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatMemoryConfig(BaseModel):
+    """Short-term conversational memory for chat context."""
+
+    enabled: bool = True
+    max_turns: int = Field(default=10, ge=1, le=50)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class ChatOptimizationConfig(BaseModel):
+    """Query rewrite / keyword optimize / clarify before retrieval."""
+
+    enabled: bool = False
+    rewrite: bool = False
+    clarify: bool = False
+
+
+class ChatMultiQueryConfig(BaseModel):
+    """Generate query variants and fuse retrieval results by consensus."""
+
+    enabled: bool = False
+    count: int = Field(default=3, ge=2, le=8)
+
+
+class ChatMultihopConfig(BaseModel):
+    """Decompose complex questions into sub-questions (hops)."""
+
+    enabled: bool = False
+    max_hops: int = Field(default=2, ge=1, le=5)
+
+
+class ChatConfig(BaseModel):
+    """Per-project chat / answer generation settings."""
+
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=2048, ge=64, le=8192)
+    top_k: int = Field(default=5, ge=1, le=50)
+    include_history: bool = True
+    # Optional quality stages (orchestrator reads them; most off by default)
+    context_window: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description="Include ±N neighboring chunks around each hit (by chunk_index).",
+    )
+    memory: ChatMemoryConfig = Field(default_factory=ChatMemoryConfig)
+    optimization: ChatOptimizationConfig = Field(default_factory=ChatOptimizationConfig)
+    multi_query: ChatMultiQueryConfig = Field(default_factory=ChatMultiQueryConfig)
+    multihop: ChatMultihopConfig = Field(default_factory=ChatMultihopConfig)
+    debug: bool = False
+
+
 class VectorRagConfig(BaseModel):
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
+    summaries: HierarchicalSummaryConfig = Field(
+        default_factory=HierarchicalSummaryConfig
+    )
+    chat: ChatConfig = Field(default_factory=ChatConfig)
 
     @classmethod
     def from_settings(cls, s: Settings | None = None) -> VectorRagConfig:
@@ -109,6 +223,8 @@ class VectorRagConfig(BaseModel):
             chunking=ChunkingConfig(strategy=s.chunking_strategy, params={}),
             retrieval=RetrievalConfig(strategy=s.retrieval_strategy, params={}),
             reranking=RerankingConfig(strategy=s.reranking_strategy, params={}),
+            summaries=HierarchicalSummaryConfig(),
+            chat=ChatConfig(),
         )
 
     @classmethod
@@ -133,8 +249,9 @@ RagConfig = VectorRagConfig
 
 
 class GraphExtractionConfig(BaseModel):
-    strategy: Literal["ocr", "vlm"] = "ocr"
+    strategy: Literal["ocr", "vlm", "docling", "hybrid_pdf"] = "ocr"
     passage_chunk_size: int = Field(default=800, ge=200, le=4096)
+    preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
 
 
 class GraphIndexingConfig(BaseModel):
@@ -196,6 +313,7 @@ class GraphRagConfig(BaseModel):
         default_factory=MicrosoftGraphIndexingConfig
     )
     retrieval: GraphRetrievalConfig = Field(default_factory=GraphRetrievalConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
 
     @classmethod
     def from_settings(
@@ -219,6 +337,7 @@ class GraphRagConfig(BaseModel):
                     else {}
                 ),
             ),
+            chat=ChatConfig(),
         )
 
     @classmethod
@@ -314,6 +433,9 @@ class EffectiveRagConfig(BaseModel):
     chunking: ChunkingConfig
     retrieval: RetrievalConfig
     reranking: RerankingConfig
+    summaries: HierarchicalSummaryConfig = Field(
+        default_factory=HierarchicalSummaryConfig
+    )
     top_k: int = 5
 
     @classmethod
@@ -350,6 +472,7 @@ class EffectiveRagConfig(BaseModel):
             chunking=project.chunking,
             retrieval=retrieval,
             reranking=reranking,
+            summaries=project.summaries.model_copy(deep=True),
             top_k=resolved_top_k,
         )
 

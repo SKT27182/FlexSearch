@@ -2,19 +2,47 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-
-import litellm
 
 from app.core.config import settings
 from app.services.model_ids import extract_litellm_provider, is_local_embedding_model
+
+# LiteLLM eagerly pre-loads Bedrock/SageMaker event-stream shapes via botocore
+# at import time. FlexSearch does not use those providers; suppress the noisy
+# optional-dependency warnings without pulling in AWS SDKs.
+_AWS_PRELOAD_MARKERS = (
+    "could not pre-load bedrock-runtime",
+    "could not pre-load sagemaker-runtime",
+)
+
+
+class _SuppressOptionalAwsPreload(logging.Filter):
+    """Drop LiteLLM warnings about missing botocore for unused AWS providers."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(marker in msg for marker in _AWS_PRELOAD_MARKERS)
+
+
+def _install_optional_aws_warning_filter() -> None:
+    logger = logging.getLogger("LiteLLM")
+    if any(isinstance(f, _SuppressOptionalAwsPreload) for f in logger.filters):
+        return
+    logger.addFilter(_SuppressOptionalAwsPreload())
+
+
+_install_optional_aws_warning_filter()
+
+import litellm  # noqa: E402  — filter must be registered before this import
 
 _configured = False
 
 
 def configure_litellm() -> None:
-    """Idempotent global LiteLLM config (verbosity)."""
+    """Idempotent global LiteLLM config (verbosity + noise filters)."""
     global _configured
+    _install_optional_aws_warning_filter()
     if _configured:
         return
     litellm.set_verbose = settings.debug

@@ -13,6 +13,9 @@ import {
   Settings,
   Download,
   Network,
+  MessageSquare,
+  Globe,
+  Archive,
 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
 import { Button, Card, CardHeader, CardTitle, CardContent, buttonVariants, Input } from '@/components/ui';
@@ -29,6 +32,9 @@ import { ResizableShell } from '@/components/ResizableShell';
 import { RagConfigForm } from '@/components/RagConfigForm';
 import { DocumentPreviewDialog } from '@/components/DocumentPreviewDialog';
 import { UploadProgressList } from '@/components/UploadProgressList';
+import { ProjectChatPanel } from '@/components/ProjectChatPanel';
+import { WebsiteCrawlDialog } from '@/components/WebsiteCrawlDialog';
+import { BulkImportDialog } from '@/components/BulkImportDialog';
 import { subscribeProjectDocuments } from '@/hooks/useDocumentStatusStream';
 import { documentId, mergeDocumentsFromServer, processingDocuments, sortDocuments, upsertDocumentFromApi, upsertDocumentFromEvent } from '@/lib/document-state';
 import { canPreview, getGraphBackend, getProjectMode, isGraphMode, projectModeLabel, type DocumentStatusEvent, type ProjectMode, type RagConfig, type RetrievalOverrides } from '@/lib/rag-types';
@@ -42,6 +48,8 @@ const PROCESSING_STATUSES = new Set([
   'chunking',
   'indexing',
 ]);
+
+type MainTab = 'chat' | 'search';
 
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -69,6 +77,9 @@ export function ProjectDetailPage() {
 
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
   const [sseActive, setSseActive] = useState(false);
+  const [mainTab, setMainTab] = useState<MainTab>('chat');
+  const [showCrawl, setShowCrawl] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wasProcessingRef = useRef(false);
@@ -485,26 +496,36 @@ export function ProjectDetailPage() {
                 <div className="text-center">
                   <Upload className="h-8 w-8 mx-auto text-muted-foreground mb-3" />
                   <h3 className="text-md font-medium mb-1">Upload Documents</h3>
-                  <p className="text-muted-foreground text-xs mb-3">PDF, TXT, MD, Images</p>
+                  <p className="text-muted-foreground text-xs mb-3">PDF, TXT, MD, HTML, Images</p>
                   <input
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    accept=".pdf,.txt,.md,.png,.jpg,.jpeg"
+                    accept=".pdf,.txt,.md,.html,.htm,.png,.jpg,.jpeg"
                     className="hidden"
                     onChange={(e) => handleUpload(e.target.files)}
                   />
-                  <Button
-                    size="sm"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isUploading}
-                  >
-                    {isUploading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      'Select Files'
-                    )}
-                  </Button>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                    >
+                      {isUploading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        'Select Files'
+                      )}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setShowCrawl(true)}>
+                      <Globe className="h-3.5 w-3.5 mr-1" />
+                      Crawl site
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setShowBulk(true)}>
+                      <Archive className="h-3.5 w-3.5 mr-1" />
+                      Bulk
+                    </Button>
+                  </div>
                   {sseActive && (
                     <p className="text-xs text-primary mt-2">Live updates via SSE</p>
                   )}
@@ -565,7 +586,7 @@ export function ProjectDetailPage() {
           </div>
         }
         main={
-          <div className="space-y-8">
+          <div className="space-y-6">
             {isMicrosoftGraph && (
               <Card>
                 <CardHeader>
@@ -619,6 +640,48 @@ export function ProjectDetailPage() {
               </Card>
             )}
 
+            <div className="flex gap-1 border-b border-border pb-0">
+              <button
+                type="button"
+                className={cn(
+                  'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+                  mainTab === 'chat'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                )}
+                onClick={() => setMainTab('chat')}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <MessageSquare className="h-4 w-4" />
+                  Chat
+                </span>
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+                  mainTab === 'search'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                )}
+                onClick={() => setMainTab('search')}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <Search className="h-4 w-4" />
+                  Search
+                </span>
+              </button>
+            </div>
+
+            {mainTab === 'chat' ? (
+              <ProjectChatPanel
+                projectId={id!}
+                graphReady={graphReady}
+                graphStatusLabel={graphStatus?.status}
+                documents={documents}
+                onPreviewDocument={(doc) => setPreviewDoc(doc)}
+              />
+            ) : (
             <Card className="shadow-md">
               <CardHeader>
                 <CardTitle>Search Knowledge Base</CardTitle>
@@ -767,6 +830,7 @@ export function ProjectDetailPage() {
                 </div>
               </CardContent>
             </Card>
+            )}
           </div>
         }
       />
@@ -779,6 +843,29 @@ export function ProjectDetailPage() {
           documentId={previewDoc.id}
           filename={previewDoc.filename}
         />
+      )}
+
+      {id && (
+        <>
+          <WebsiteCrawlDialog
+            open={showCrawl}
+            onOpenChange={setShowCrawl}
+            projectId={id}
+            onQueued={() => {
+              setSseActive(true);
+              void syncDocuments();
+            }}
+          />
+          <BulkImportDialog
+            open={showBulk}
+            onOpenChange={setShowBulk}
+            projectId={id}
+            onQueued={() => {
+              setSseActive(true);
+              void syncDocuments();
+            }}
+          />
+        </>
       )}
     </div>
   );

@@ -1,16 +1,21 @@
 import { useEffect } from 'react';
 import { ragApi } from '@/lib/api';
 import type {
+  ChatConfig,
   ChunkingStrategy,
   GraphBackend,
   GraphRagConfig,
+  HierarchyRetrievalMode,
+  HierarchicalSummaryConfig,
   RagConfig,
   RagMode,
   RetrievalStrategy,
   VectorRagConfig,
 } from '@/lib/rag-types';
 import {
+  defaultChatConfig,
   defaultConfigForProjectMode,
+  defaultSummariesConfig,
   isGraphRagConfig,
   projectModeToRagMode,
   type ProjectMode,
@@ -40,6 +45,187 @@ function asGraphConfig(value: RagConfig, backend: GraphBackend): GraphRagConfig 
   return defaultConfigForProjectMode(
     backend === 'microsoft' ? 'graph_microsoft' : 'graph_neo4j'
   ) as GraphRagConfig;
+}
+
+function resolveChat(config: { chat?: ChatConfig }): ChatConfig {
+  return { ...defaultChatConfig(), ...(config.chat || {}) };
+}
+
+function ChatStagesSection({
+  chat,
+  label,
+  onChange,
+}: {
+  chat: ChatConfig;
+  label: string;
+  onChange: (chat: ChatConfig) => void;
+}) {
+  return (
+    <div className="space-y-3 border-t border-border/60 pt-4">
+      <label className={`${label} font-medium`}>Chat quality</label>
+      <p className="text-xs text-muted-foreground">
+        Optional steps that refine chat search and answers (nearby chunks,
+        rewrite, multi-query, multi-hop, timings). Memory is on by default for
+        conversation context; other stages start off.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-xs text-muted-foreground">Top K</label>
+          <Input
+            type="number"
+            min={1}
+            max={50}
+            value={chat.top_k}
+            onChange={(e) => onChange({ ...chat, top_k: Number(e.target.value) })}
+          />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground">
+            Neighbor expand (±N)
+          </label>
+          <Input
+            type="number"
+            min={0}
+            max={5}
+            value={chat.context_window}
+            onChange={(e) =>
+              onChange({ ...chat, context_window: Number(e.target.value) })
+            }
+          />
+        </div>
+      </div>
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={chat.memory.enabled}
+          onChange={(e) =>
+            onChange({
+              ...chat,
+              memory: { ...chat.memory, enabled: e.target.checked },
+            })
+          }
+        />
+        Session memory (conversation context)
+      </label>
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={chat.optimization.enabled}
+          onChange={(e) =>
+            onChange({
+              ...chat,
+              optimization: { ...chat.optimization, enabled: e.target.checked },
+            })
+          }
+        />
+        Query rewrite & clarify
+      </label>
+      {chat.optimization.enabled && (
+        <div className="ml-5 space-y-1">
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={chat.optimization.rewrite}
+              onChange={(e) =>
+                onChange({
+                  ...chat,
+                  optimization: { ...chat.optimization, rewrite: e.target.checked },
+                })
+              }
+            />
+            Rewrite using chat history
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={chat.optimization.clarify}
+              onChange={(e) =>
+                onChange({
+                  ...chat,
+                  optimization: { ...chat.optimization, clarify: e.target.checked },
+                })
+              }
+            />
+            Ask when the question is unclear
+          </label>
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={chat.multi_query.enabled}
+          onChange={(e) =>
+            onChange({
+              ...chat,
+              multi_query: { ...chat.multi_query, enabled: e.target.checked },
+            })
+          }
+        />
+        Multi-query search
+      </label>
+      {chat.multi_query.enabled && (
+        <div className="ml-5">
+          <label className="text-xs text-muted-foreground">Query variants</label>
+          <Input
+            type="number"
+            min={2}
+            max={8}
+            value={chat.multi_query.count}
+            onChange={(e) =>
+              onChange({
+                ...chat,
+                multi_query: { ...chat.multi_query, count: Number(e.target.value) },
+              })
+            }
+          />
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={chat.multihop.enabled}
+          onChange={(e) =>
+            onChange({
+              ...chat,
+              multihop: { ...chat.multihop, enabled: e.target.checked },
+            })
+          }
+        />
+        Multi-hop (break into sub-questions)
+      </label>
+      {chat.multihop.enabled && (
+        <div className="ml-5">
+          <label className="text-xs text-muted-foreground">Max hops</label>
+          <Input
+            type="number"
+            min={1}
+            max={5}
+            value={chat.multihop.max_hops}
+            onChange={(e) =>
+              onChange({
+                ...chat,
+                multihop: { ...chat.multihop, max_hops: Number(e.target.value) },
+              })
+            }
+          />
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={chat.debug}
+          onChange={(e) => onChange({ ...chat, debug: e.target.checked })}
+        />
+        Show stage timings in chat
+      </label>
+    </div>
+  );
 }
 
 export function RagConfigForm({
@@ -77,18 +263,20 @@ export function RagConfigForm({
           <select
             className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
             value={graphConfig.extraction.strategy}
-            onChange={(e) =>
-              updateGraph({
-                extraction: {
-                  ...graphConfig.extraction,
-                  strategy: e.target.value as 'ocr' | 'vlm',
-                },
-              })
-            }
-          >
-            <option value="ocr">OCR</option>
-            <option value="vlm">VLM</option>
-          </select>
+          onChange={(e) =>
+            updateGraph({
+              extraction: {
+                ...graphConfig.extraction,
+                strategy: e.target.value as GraphRagConfig['extraction']['strategy'],
+              },
+            })
+          }
+        >
+          <option value="ocr">OCR</option>
+          <option value="vlm">VLM</option>
+          <option value="docling">Docling</option>
+          <option value="hybrid_pdf">Hybrid PDF</option>
+        </select>
         </div>
 
         <div className="space-y-2">
@@ -213,6 +401,12 @@ export function RagConfigForm({
             <option value="graph_global">Graph global (thematic)</option>
           </select>
         </div>
+
+        <ChatStagesSection
+          chat={resolveChat(graphConfig)}
+          label={label}
+          onChange={(chat) => updateGraph({ chat })}
+        />
       </div>
     );
   }
@@ -232,13 +426,33 @@ export function RagConfigForm({
           value={vectorConfig.extraction.strategy}
           onChange={(e) =>
             updateVector({
-              extraction: { strategy: e.target.value as 'ocr' | 'vlm' },
+              extraction: {
+                ...vectorConfig.extraction,
+                strategy: e.target.value as VectorRagConfig['extraction']['strategy'],
+              },
             })
           }
         >
           <option value="ocr">OCR</option>
           <option value="vlm">VLM</option>
+          <option value="docling">Docling</option>
+          <option value="hybrid_pdf">Hybrid PDF</option>
         </select>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={vectorConfig.extraction.extract_hierarchy !== false}
+            onChange={(e) =>
+              updateVector({
+                extraction: {
+                  ...vectorConfig.extraction,
+                  extract_hierarchy: e.target.checked,
+                },
+              })
+            }
+          />
+          Extract heading hierarchy into chunk metadata
+        </label>
       </div>
 
       <div className="space-y-2">
@@ -248,14 +462,18 @@ export function RagConfigForm({
           value={vectorConfig.chunking.strategy}
           onChange={(e) => {
             const strategy = e.target.value as ChunkingStrategy;
-            let params: Record<string, number | null>;
-            if (strategy === 'fixed_window' || strategy === 'recursive') {
+            let params: Record<string, number | boolean | string | null>;
+            if (strategy === 'fixed_window') {
               params = { chunk_size: 512, overlap: 50 };
+            } else if (strategy === 'recursive') {
+              params = { chunk_size: 512, overlap: 50, preserve_structure: true };
             } else if (strategy === 'semantic') {
               params = {
                 similarity_threshold: 0.5,
                 min_chunk_size: 100,
                 max_chunk_size: 1000,
+                breakpoint_threshold_type: 'percentile',
+                buffer_size: 1,
               };
             } else {
               params = {
@@ -268,7 +486,7 @@ export function RagConfigForm({
           }}
         >
           <option value="fixed_window">Fixed window</option>
-          <option value="recursive">Recursive</option>
+          <option value="recursive">Recursive (structure-preserving)</option>
           <option value="semantic">Semantic</option>
           <option value="parent_child">Parent / child</option>
         </select>
@@ -313,6 +531,26 @@ export function RagConfigForm({
             </div>
           </div>
         )}
+        {vectorConfig.chunking.strategy === 'recursive' && (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={vectorConfig.chunking.params.preserve_structure !== false}
+              onChange={(e) =>
+                updateVector({
+                  chunking: {
+                    ...vectorConfig.chunking,
+                    params: {
+                      ...vectorConfig.chunking.params,
+                      preserve_structure: e.target.checked,
+                    },
+                  },
+                })
+              }
+            />
+            Preserve tables / code fences as atomic units
+          </label>
+        )}
       </div>
 
       <div className="space-y-2">
@@ -336,6 +574,56 @@ export function RagConfigForm({
       </div>
 
       <div className="space-y-2">
+        <label className={`${label} font-medium`}>Hierarchical summaries</label>
+        <p className="text-xs text-muted-foreground">
+          Celery summary queue builds cluster + document manifesto after ingest.
+        </p>
+        {(() => {
+          const summaries: HierarchicalSummaryConfig = {
+            ...defaultSummariesConfig(),
+            ...(vectorConfig.summaries || {}),
+          };
+          return (
+            <>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={summaries.enabled}
+                  onChange={(e) =>
+                    updateVector({
+                      summaries: { ...summaries, enabled: e.target.checked },
+                    })
+                  }
+                />
+                Build summaries after indexing
+              </label>
+              <div>
+                <label className="text-xs text-muted-foreground">
+                  Hierarchy retrieval mode
+                </label>
+                <select
+                  className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  value={summaries.retrieval_mode}
+                  onChange={(e) =>
+                    updateVector({
+                      summaries: {
+                        ...summaries,
+                        retrieval_mode: e.target.value as HierarchyRetrievalMode,
+                      },
+                    })
+                  }
+                >
+                  <option value="chunks_only">Chunks only</option>
+                  <option value="summaries_first">Summaries first (expand members)</option>
+                  <option value="mixed">Mixed (summaries + chunks)</option>
+                </select>
+              </div>
+            </>
+          );
+        })()}
+      </div>
+
+      <div className="space-y-2">
         <label className={`${label} font-medium`}>Reranking</label>
         <select
           className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
@@ -353,6 +641,12 @@ export function RagConfigForm({
           <option value="cross_encoder">Cross-encoder</option>
         </select>
       </div>
+
+      <ChatStagesSection
+        chat={resolveChat(vectorConfig)}
+        label={label}
+        onChange={(chat) => updateVector({ chat })}
+      />
     </div>
   );
 }

@@ -1,0 +1,12 @@
+The user question may be ambiguous or underspecified.
+
+Question: {{ question }}
+{% if history %}
+Recent conversation:
+{% for turn in history %}
+{{ turn.role | capitalize }}: {{ turn.content }}
+{% endfor %}
+{% endif %}
+
+If clarification would materially improve retrieval, ask one short clarifying question.
+Otherwise reply with exactly: NO_CLARIFY

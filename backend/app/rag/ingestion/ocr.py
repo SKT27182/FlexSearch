@@ -34,6 +34,7 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
         "image/jpg",
         "text/plain",
         "text/markdown",
+        "text/html",
     }
 
     def __init__(self):
@@ -76,6 +77,12 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
 
         if content_type in {"text/plain", "text/markdown"}:
             return self._extract_text(content, filename)
+        if content_type == "text/html":
+            from app.services.website.content_extractor import extract_clean_content
+
+            html = content.decode("utf-8", errors="replace")
+            md = extract_clean_content(html) or html
+            return ExtractedContent(text=md, page_count=1, metadata={"filename": filename})
         if content_type == "application/pdf":
             if on_progress:
                 await on_progress("Extracting text from PDF…", None, None)

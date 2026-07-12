@@ -193,6 +193,99 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(
+        "ChatSession",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
+
+class ChatSession(Base):
+    """Chat session scoped to a project and owning user."""
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    project: Mapped["Project"] = relationship(
+        "Project",
+        back_populates="chat_sessions",
+    )
+    user: Mapped["User"] = relationship("User")
+    turns: Mapped[list["ChatTurn"]] = relationship(
+        "ChatTurn",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ChatTurn.created_at",
+    )
+
+
+class ChatTurn(Base):
+    """One user/assistant exchange (or message) within a chat session."""
+
+    __tablename__ = "chat_turns"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    retrieval_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reranking_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    session: Mapped["ChatSession"] = relationship(
+        "ChatSession",
+        back_populates="turns",
+    )
 
 
 class Document(Base):

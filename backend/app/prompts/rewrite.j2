@@ -1,0 +1,13 @@
+Rewrite the user's latest message into a standalone search query that can be
+understood without prior conversation. Preserve intent and key entities.
+If the message is already standalone, reply with exactly: NO_REWRITE
+
+Latest message: {{ question }}
+{% if history %}
+Conversation history:
+{% for turn in history %}
+{{ turn.role | capitalize }}: {{ turn.content }}
+{% endfor %}
+{% endif %}
+
+Standalone query:

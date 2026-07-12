@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
-.PHONY: help install dev-local dev up down clean clean-all clean-hard print-urls prepare-logs stop-local wait-db logs logs-local \
-	build test test-cov lint format db-migrate db-revision db-shell redis-cli
+.PHONY: help install dev-local worker-local dev up down clean clean-all clean-hard print-urls prepare-logs stop-local wait-db logs logs-local \
+	build test test-cov eval lint format db-migrate db-revision db-shell redis-cli
 
 CYAN := \033[36m
 RESET := \033[0m
@@ -13,6 +13,8 @@ BACKEND_LOG := $(LOG_DIR)/backend.log
 FRONTEND_LOG := $(LOG_DIR)/frontend.log
 BACKEND_PID := $(LOG_DIR)/backend.pid
 FRONTEND_PID := $(LOG_DIR)/frontend.pid
+WORKER_PID := $(LOG_DIR)/worker.pid
+WORKER_LOG := $(LOG_DIR)/worker.log
 # DEV_LOG_MODE: file | console | both (default)
 DEV_LOG_MODE ?= both
 BACKEND_ENV_FILE := $(if $(wildcard backend/.env),backend/.env,backend/.env.example)
@@ -40,15 +42,17 @@ prepare-logs:
 	@if [ "$(DEV_LOG_MODE)" != "console" ]; then \
 		: > "$(BACKEND_LOG)"; \
 		: > "$(FRONTEND_LOG)"; \
+		: > "$(WORKER_LOG)"; \
 	fi
 
-dev-local: install prepare-logs ## Run backend + frontend locally (DEV_LOG_MODE=file|console|both)
+dev-local: install prepare-logs ## Run backend + frontend + Celery worker locally
 	@$(MAKE) --no-print-directory stop-local
 	@$(MAKE) --no-print-directory wait-db
 	@echo "log mode: $(DEV_LOG_MODE)"
 	@if [ "$(DEV_LOG_MODE)" != "console" ]; then \
 		echo "backend log:  $(BACKEND_LOG)"; \
 		echo "frontend log: $(FRONTEND_LOG)"; \
+		echo "worker log:   $(WORKER_LOG)"; \
 	fi
 	@$(MAKE) --no-print-directory print-urls
 	@bash -c 'set -euo pipefail; \
@@ -64,13 +68,21 @@ dev-local: install prepare-logs ## Run backend + frontend locally (DEV_LOG_MODE=
 				file|*) exec >> "$$logfile" 2>&1 ;; \
 			esac; \
 		}; \
-		trap '"'"'kill $$backend_pid $$frontend_pid 2>/dev/null || true; rm -f "$(BACKEND_PID)" "$(FRONTEND_PID)"'"'"' INT TERM EXIT; \
+		trap '"'"'kill $$backend_pid $$frontend_pid $$worker_pid 2>/dev/null || true; rm -f "$(BACKEND_PID)" "$(FRONTEND_PID)" "$(WORKER_PID)"'"'"' INT TERM EXIT; \
 		( setup_log_pipe "$(BACKEND_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
 		  PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
 		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-$(BACKEND_PORT)}" --app-dir backend \
 		) & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
+		( setup_log_pipe "$(WORKER_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
+		  cd backend && .venv/bin/celery -A app.celery_app worker --loglevel=INFO \
+		    -Q ingest,graph,summary,default --concurrency=2 \
+		) & worker_pid=$$!; echo $$worker_pid > "$(WORKER_PID)"; \
 		( setup_log_pipe "$(FRONTEND_LOG)"; cd frontend && pnpm run dev ) & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
-		wait $$backend_pid $$frontend_pid'
+		wait $$backend_pid $$frontend_pid $$worker_pid'
+
+worker-local: ## Run Celery worker only (queues: ingest,graph,summary,default)
+	cd backend && .venv/bin/celery -A app.celery_app worker --loglevel=INFO \
+		-Q ingest,graph,summary,default --concurrency=2
 
 up: ## Start app containers in Docker
 	docker compose up -d --build
@@ -78,9 +90,12 @@ up: ## Start app containers in Docker
 
 dev: up ## Run with Docker
 
-stop-local: ## Stop locally started backend/frontend processes from pid files
+stop-local: ## Stop locally started backend/frontend/worker processes from pid files
 	@if [ -f "$(BACKEND_PID)" ]; then kill "$$(cat "$(BACKEND_PID)")" 2>/dev/null || true; rm -f "$(BACKEND_PID)"; fi
 	@if [ -f "$(FRONTEND_PID)" ]; then kill "$$(cat "$(FRONTEND_PID)")" 2>/dev/null || true; rm -f "$(FRONTEND_PID)"; fi
+	@if [ -f "$(WORKER_PID)" ]; then kill "$$(cat "$(WORKER_PID)")" 2>/dev/null || true; rm -f "$(WORKER_PID)"; fi
+	@# Use [c]elery so pkill -f does not match this make/shell recipe (self-SIGTERM).
+	@pkill -f "[c]elery -A app.celery_app" 2>/dev/null || true
 	@for port in "$(BACKEND_PORT)" "$(FRONTEND_PORT)"; do \
 		pids="$$(ss -ltnp | awk -v p=":$$port$$" '$$4 ~ p {print}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"; \
 		if [ -n "$$pids" ]; then \
@@ -122,6 +137,9 @@ build: ## Build frontend for production
 
 test: ## Run backend tests
 	cd backend && .venv/bin/pytest tests/ -v
+
+eval: ## Run golden-set RAG eval harness (CI-safe, offline)
+	cd backend && .venv/bin/python -m app.eval --k 5 --min-hit-at-k 0.8 --min-faithfulness 0.5
 
 test-cov: ## Run tests with coverage
 	cd backend && .venv/bin/pytest tests/ -v --cov=app --cov-report=html

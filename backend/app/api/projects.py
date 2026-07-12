@@ -6,6 +6,7 @@ Project CRUD endpoints.
 
 import io
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -253,6 +254,10 @@ async def get_graph_index_status(
             status_code=400,
             detail="Graph index status is only available for graph projects",
         )
+    from app.services.graph_index_tasks import reconcile_stale_graph_index
+
+    await reconcile_stale_graph_index(project_id)
+    await db.refresh(project)
     state = GraphIndexState.from_db(project.graph_index_status)
     return GraphIndexStatusResponse(
         backend=state.backend,
@@ -276,15 +281,22 @@ async def rebuild_graph_index(
     if project.rag_mode != RagMode.GRAPH:
         raise HTTPException(status_code=400, detail="Project is not in graph mode")
     backend = graph_backend_for_project(project.rag_mode, project.rag_config)
+    started = datetime.now(timezone.utc)
     if backend == "microsoft":
         project.graph_index_status = GraphIndexState(
-            backend="microsoft", status="indexing"
+            backend="microsoft",
+            status="indexing",
+            indexing_started_at=started,
         ).to_db()
         await db.commit()
         schedule_graph_index_rebuild(project_id, debounce_seconds=0.0)
     else:
         project.graph_index_status = GraphIndexState(
-            backend="neo4j", status="indexing", entity_count=0, passage_count=0
+            backend="neo4j",
+            status="indexing",
+            indexing_started_at=started,
+            entity_count=0,
+            passage_count=0,
         ).to_db()
         await db.commit()
         docs_result = await db.execute(

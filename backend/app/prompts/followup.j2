@@ -1,0 +1,20 @@
+Generate {{ count }} short follow-up questions the user might ask next.
+
+Original question:
+{{ query }}
+
+Assistant answer (excerpt):
+{{ answer }}
+
+{% if context %}
+Optional corpus context:
+{{ context }}
+{% endif %}
+
+Rules:
+- Questions must be answerable from the project documents
+- Do not repeat the original question
+- Keep each question under 120 characters
+
+Return ONLY valid JSON:
+{"questions": ["...", "..."]}

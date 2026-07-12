@@ -1,12 +1,14 @@
 """
 FlexSearch Backend - Parent-Child Retrieval Strategy
 
-Search child chunks, return parent context.
+Search child chunks, fetch parents by id, score by best child.
 """
 
-from app.services.embedding import get_embedding_service
 from app.rag.retrieval.base import BaseRetrievalStrategy, RetrievalResult
-from app.services.vector_store import get_vector_store
+from app.schemas.rag_config import HierarchyRetrievalMode
+from app.services.embedding import get_embedding_service
+from app.services.search_store import get_search_store
+from app.services.search_store.types import SearchFilters
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -15,8 +17,16 @@ logger = create_logger(__name__)
 class ParentChildRetrieval(BaseRetrievalStrategy):
     """Parent-child retrieval: search children, return parents."""
 
-    def __init__(self, score_threshold: float | None = None) -> None:
+    def __init__(
+        self,
+        score_threshold: float | None = None,
+        *,
+        hierarchy_mode: HierarchyRetrievalMode = "chunks_only",
+    ) -> None:
         self._score_threshold = score_threshold
+        # Parent-child always searches chunk-level children; hierarchy_mode
+        # is accepted for factory API symmetry but does not change filters.
+        self._hierarchy_mode = hierarchy_mode
 
     @property
     def name(self) -> str:
@@ -29,82 +39,76 @@ class ParentChildRetrieval(BaseRetrievalStrategy):
         top_k: int = 5,
     ) -> list[RetrievalResult]:
         """
-        Retrieve by searching child chunks and returning parent content.
-
-        This provides more precise matching (children) with better
-        context (parents) in the final results.
+        Search child chunks, resolve parents via get_by_ids, score by best child.
         """
-        # Generate query embedding
         embedding_service = get_embedding_service()
         query_vector = embedding_service.embed(query)
+        store = get_search_store()
 
-        # Search only child chunks
-        vector_store = get_vector_store()
-        results = vector_store.search_with_filter(
+        child_hits = store.dense_search(
             query_vector=query_vector,
-            filters={
-                "project_id": project_id,
-                "chunk_type": "child",
-            },
-            top_k=top_k * 2,  # Get more to account for deduplication
+            filters=SearchFilters(
+                project_id=project_id,
+                chunk_type="child",
+                summary_level="chunk",
+            ),
+            top_k=top_k * 2,
+            score_threshold=self._score_threshold,
         )
 
-        # Collect unique parent IDs
-        parent_ids = set()
-        child_to_parent = {}
-
-        for result in results:
-            payload = result.get("payload", {})
-            parent_id = payload.get("parent_id")
-            if parent_id:
-                parent_ids.add(parent_id)
-                child_to_parent[result.get("id")] = {
-                    "parent_id": parent_id,
-                    "score": result.get("score", 0.0),
-                }
-
-        # Fetch parent chunks
-        # Note: In a production system, you'd batch fetch parents from Qdrant
-        # For now, we'll search for parents and match them
-        parent_results = vector_store.search_with_filter(
-            query_vector=query_vector,
-            filters={
-                "project_id": project_id,
-                "chunk_type": "parent",
-            },
-            top_k=top_k,
-        )
-
-        # Create results using parent content with child scores
-        retrieval_results = []
-        seen_parents = set()
-
-        for result in parent_results:
-            payload = result.get("payload", {})
-            parent_chunk_id = payload.get("parent_chunk_id", "")
-
-            if parent_chunk_id in seen_parents:
+        # parent_id -> best child score (+ first child metadata)
+        best_child: dict[str, tuple[float, str]] = {}
+        for hit in child_hits:
+            parent_id = hit.parent_id
+            if not parent_id:
                 continue
-            seen_parents.add(parent_chunk_id)
+            prev = best_child.get(parent_id)
+            if prev is None or hit.score > prev[0]:
+                best_child[parent_id] = (hit.score, hit.id)
 
+        if not best_child:
+            logger.debug(
+                "No child hits with parent_id for project %s", project_id
+            )
+            return []
+
+        # Prefer parents ordered by best child score
+        ordered_parent_ids = sorted(
+            best_child.keys(),
+            key=lambda pid: best_child[pid][0],
+            reverse=True,
+        )[:top_k]
+
+        parents = store.get_by_ids(ordered_parent_ids)
+        parent_by_id = {p.id: p for p in parents}
+
+        retrieval_results: list[RetrievalResult] = []
+        for parent_id in ordered_parent_ids:
+            parent = parent_by_id.get(parent_id)
+            if parent is None:
+                logger.warning("Parent chunk %s not found in index", parent_id)
+                continue
+            child_score, child_id = best_child[parent_id]
             retrieval_results.append(
                 RetrievalResult(
-                    content=payload.get("content", ""),
-                    score=result.get("score", 0.0),
-                    document_id=payload.get("document_id", ""),
-                    chunk_id=result.get("id", ""),
+                    content=parent.content,
+                    score=child_score,
+                    document_id=parent.document_id,
+                    chunk_id=parent.id,
                     metadata={
-                        "filename": payload.get("filename", ""),
-                        "chunk_index": payload.get("chunk_index", 0),
+                        "filename": parent.filename,
+                        "chunk_index": parent.chunk_index,
+                        "summary_level": parent.summary_level,
                         "retrieval_type": "parent_child",
+                        "matched_child_id": child_id,
+                        "child_score": child_score,
                     },
                 )
             )
 
-            if len(retrieval_results) >= top_k:
-                break
-
         logger.debug(
-            f"Retrieved {len(retrieval_results)} parent chunks for project {project_id}"
+            "Retrieved %d parent chunks for project %s",
+            len(retrieval_results),
+            project_id,
         )
         return retrieval_results

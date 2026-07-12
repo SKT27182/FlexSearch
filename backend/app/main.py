@@ -4,7 +4,6 @@ FlexSearch Backend - FastAPI Application
 Main entry point for the RAG platform API.
 """
 
-import logging
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -21,11 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.utils.logger import create_logger
 from app.utils.logging_bridge import (
+    configure_third_party_loggers,
     patch_graphrag_init_loggers,
     setup_unified_logging,
 )
 
-from app.api import admin, auth, documents, projects, rag, retrieval
+from app.api import admin, auth, bulk, chat, documents, jobs, projects, rag, retrieval, website
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.core.security import verify_password
@@ -36,8 +36,11 @@ from app.db.models import User
 
 logger = create_logger(__name__, level=settings.log_level)
 
-# Route GraphRAG/LiteLLM and all propagated loggers to ~/.local/share/dev-logs/.../backend.log
+# Route GraphRAG/LiteLLM/SQLAlchemy/uvicorn into the colored + file logging stack.
+# setup_unified_logging already calls configure_third_party_loggers; re-apply after
+# import so a late uvicorn dictConfig cannot leave plain white handlers behind.
 _log_file = setup_unified_logging(settings.log_level)
+configure_third_party_loggers(settings.log_level)
 patch_graphrag_init_loggers()
 logger.info("Unified logging enabled (backend log: %s)", _log_file)
 
@@ -45,6 +48,8 @@ logger.info("Unified logging enabled (backend log: %s)", _log_file)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+    # Re-apply after uvicorn's own logging setup (CLI / reload workers).
+    configure_third_party_loggers(settings.log_level)
     # Startup
     logger.info("Starting FlexSearch Backend...")
     await init_db()
@@ -128,7 +133,11 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
+app.include_router(website.router, prefix="/api")
+app.include_router(bulk.router, prefix="/api")
+app.include_router(jobs.router, prefix="/api")
 app.include_router(retrieval.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 app.include_router(rag.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
@@ -145,8 +154,57 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health_check() -> dict:
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """Health check endpoint (includes OpenSearch + Redis smoke status)."""
+    services: dict[str, str] = {}
+    try:
+        from app.services.search_store import get_search_store
+        from app.services.search_store.opensearch_store import OpenSearchStore
+
+        store = get_search_store()
+        if isinstance(store, OpenSearchStore) and store.ping():
+            services["opensearch"] = "ok"
+        else:
+            services["opensearch"] = "unreachable"
+    except Exception as exc:
+        services["opensearch"] = f"error: {exc}"
+
+    try:
+        from app.services.redis_client import get_redis
+
+        redis = await get_redis()
+        if redis is None:
+            services["redis"] = "unreachable"
+        else:
+            pong = await redis.ping()
+            services["redis"] = "ok" if pong else "unreachable"
+    except Exception as exc:
+        services["redis"] = f"error: {exc}"
+
+    healthy = services.get("opensearch") == "ok" and services.get("redis") == "ok"
+    payload: dict = {
+        "status": "healthy" if healthy else "degraded",
+        "services": services,
+    }
+    if settings.metrics_enabled:
+        from app.observability.metrics import metrics
+
+        payload["metrics"] = metrics.snapshot()
+    return payload
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus text exposition of in-process FlexSearch metrics."""
+    from fastapi.responses import PlainTextResponse
+
+    if not settings.metrics_enabled:
+        raise HTTPException(status_code=404, detail="Metrics disabled")
+    from app.observability.metrics import metrics
+
+    return PlainTextResponse(
+        metrics.render_prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/api/docs", include_in_schema=False)
@@ -175,9 +233,12 @@ async def openapi_redirect() -> RedirectResponse:
 if __name__ == "__main__":
     import uvicorn
 
+    # log_config=None: keep our colored handlers; do not let uvicorn dictConfig
+    # reinstall plain white formatters.
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=settings.api_port,
         reload=settings.debug,
+        log_config=None,
     )

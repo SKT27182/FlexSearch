@@ -1,14 +1,48 @@
-"""Schedule document processing on the running event loop."""
+"""Schedule document processing via Celery (Redis broker + SSE progress)."""
 
 from __future__ import annotations
 
-import asyncio
 from uuid import UUID
 
-from app.services.document_worker import ReindexMode, process_document
+from celery.result import AsyncResult
+
+from app.services.celery_schedule import prepare_reusable_task_id
+from app.services.document_worker import ReindexMode
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
+
+
+def _ingest_task_id(document_id: UUID, mode: ReindexMode) -> str:
+    """Idempotent Celery task id — one active ingest per document+mode."""
+    return f"ingest:{document_id}:{mode.value}"
+
+
+def cancel_document_ingest(document_id: UUID) -> None:
+    """
+    Revoke any in-flight / queued ingest job for this document.
+
+    Must run before Neo4j/OpenSearch wipe on delete. Otherwise the worker keeps
+    writing graph nodes while delete_document_subgraph removes them, which
+    surfaces as Neo4j EntityNotFound and leaves the UI stuck at ~75%.
+    """
+    from app.services.celery_tasks import process_document_task
+
+    app = process_document_task.app
+    for mode in ReindexMode:
+        task_id = _ingest_task_id(document_id, mode)
+        try:
+            app.control.revoke(task_id, terminate=True)
+            AsyncResult(task_id, app=app).forget()
+            logger.info(
+                "Revoked ingest task document=%s task_id=%s",
+                document_id,
+                task_id,
+            )
+        except Exception:
+            logger.debug(
+                "Could not revoke ingest task %s", task_id, exc_info=True
+            )
 
 
 def schedule_process_document(
@@ -17,29 +51,32 @@ def schedule_process_document(
     *,
     force_full_extract: bool = False,
     mode: ReindexMode = ReindexMode.AUTO,
-) -> None:
-    """Run process_document as a tracked asyncio task (more reliable than BackgroundTasks)."""
+) -> str | None:
+    """Enqueue process_document on the Celery `ingest` queue."""
+    from app.services.celery_tasks import process_document_task
 
-    async def _run() -> None:
-        try:
-            await process_document(
-                document_id,
-                project_id,
-                force_full_extract=force_full_extract,
-                mode=mode,
-            )
-        except Exception:
-            logger.exception(
-                "Background process_document failed for %s", document_id
-            )
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.error(
-            "No event loop for process_document %s; call from async context",
+    base_id = _ingest_task_id(document_id, mode)
+    task_id = prepare_reusable_task_id(base_id, process_document_task.app)
+    if task_id is None:
+        logger.info(
+            "Ingest already running/queued for document=%s task_id=%s",
             document_id,
+            base_id,
         )
-        return
+        return base_id
 
-    loop.create_task(_run(), name=f"process_document:{document_id}")
+    async_result = process_document_task.apply_async(
+        args=[str(document_id), str(project_id)],
+        kwargs={
+            "force_full_extract": force_full_extract,
+            "mode": mode.value,
+        },
+        task_id=task_id,
+        queue="ingest",
+    )
+    logger.info(
+        "Enqueued Celery ingest document=%s task_id=%s",
+        document_id,
+        async_result.id,
+    )
+    return async_result.id

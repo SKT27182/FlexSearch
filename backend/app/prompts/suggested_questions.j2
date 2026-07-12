@@ -1,0 +1,12 @@
+Generate {{ count }} useful questions a user could ask about the project "{{ project_name }}".
+
+Use the corpus context below (document manifesto, cluster summaries, or graph entities).
+Questions should be specific, answerable from the corpus, and varied in scope.
+
+Return ONLY valid JSON of the form:
+{"questions": ["...", "..."]}
+
+{% if context %}
+Corpus context:
+{{ context }}
+{% endif %}

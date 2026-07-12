@@ -64,7 +64,10 @@ class TestProjectsCRUD:
         )
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 2
+        assert data["total"] == 2
+        assert len(data["projects"]) == 2
+        names = {p["name"] for p in data["projects"]}
+        assert names == {"Project 1", "Project 2"}
 
     async def test_get_project(
         self, async_client: AsyncClient, db_session: AsyncSession

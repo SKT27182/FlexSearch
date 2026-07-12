@@ -38,6 +38,7 @@ class VLMExtractionStrategy(BaseExtractionStrategy):
         "image/jpg",
         "text/plain",
         "text/markdown",
+        "text/html",
     }
 
     VLM_PROMPT = """Analyze this image and extract all text content. 
@@ -73,6 +74,16 @@ Return only the extracted text, formatted cleanly."""
             return ExtractedContent(
                 text=text,
                 metadata={"filename": filename, "extraction_method": "direct"},
+                page_count=1,
+            )
+        if content_type == "text/html":
+            from app.services.website.content_extractor import extract_clean_content
+
+            html = content.decode("utf-8", errors="replace")
+            text = extract_clean_content(html) or html
+            return ExtractedContent(
+                text=text,
+                metadata={"filename": filename, "extraction_method": "html"},
                 page_count=1,
             )
         if content_type == "application/pdf":

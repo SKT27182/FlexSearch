@@ -1,0 +1,52 @@
+[
+  {
+    "id": "q1",
+    "question": "What is FlexSearch?",
+    "relevant_chunk_ids": ["chunk:flexsearch-intro"],
+    "relevant_texts": [
+      "FlexSearch is an enterprise RAG platform with OpenSearch retrieval and chat."
+    ],
+    "gold_answer": "FlexSearch is an enterprise RAG platform that uses OpenSearch for retrieval and provides chat with citations.",
+    "modes": ["chunks_only", "mixed"]
+  },
+  {
+    "id": "q2",
+    "question": "How does hierarchical summary retrieval work?",
+    "relevant_chunk_ids": ["chunk:hier-summaries"],
+    "relevant_texts": [
+      "Hierarchical summaries cluster chunks with K-Means, then index cluster and document summaries with member_chunk_ids for expansion."
+    ],
+    "gold_answer": "Hierarchical summaries cluster chunks, store cluster and document summaries, and expand member_chunk_ids at retrieval time.",
+    "modes": ["summaries_first", "mixed", "chunks_only"]
+  },
+  {
+    "id": "q3",
+    "question": "What queues does Celery use?",
+    "relevant_chunk_ids": ["chunk:celery-queues"],
+    "relevant_texts": [
+      "FlexSearch Celery workers consume ingest, graph, summary, and default queues over Redis."
+    ],
+    "gold_answer": "Celery uses ingest, graph, summary, and default queues backed by Redis.",
+    "modes": ["chunks_only"]
+  },
+  {
+    "id": "q4",
+    "question": "How are crawl URLs protected from SSRF?",
+    "relevant_chunk_ids": ["chunk:ssrf"],
+    "relevant_texts": [
+      "Crawl and bulk URL fetches reject private, loopback, and link-local IP addresses after DNS resolution."
+    ],
+    "gold_answer": "SSRF protection blocks private and loopback IPs after resolving crawl and bulk URLs.",
+    "modes": ["chunks_only", "mixed"]
+  },
+  {
+    "id": "q5",
+    "question": "What metrics track empty retrieval?",
+    "relevant_chunk_ids": ["chunk:metrics-empty"],
+    "relevant_texts": [
+      "flexsearch_chat_empty_retrieval_total counts chat turns with no retrieved context; empty_retrieval_rate is exposed on /health."
+    ],
+    "gold_answer": "Empty retrieval is tracked by flexsearch_chat_empty_retrieval_total and the empty_retrieval_rate on health.",
+    "modes": ["chunks_only"]
+  }
+]

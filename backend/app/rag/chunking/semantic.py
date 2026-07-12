@@ -1,48 +1,73 @@
 """
-FlexSearch Backend - Semantic Chunking Strategy
+Semantic chunking via LangChain ``SemanticChunker``.
 
-Embedding-based semantic text splitting.
+Uses FlexSearch ``EmbeddingService`` through ``FlexSearchEmbeddings`` so local
+sentence-transformers and LiteLLM API embeddings both work. Oversized semantic
+groups are capped with ``RecursiveCharacterTextSplitter`` for production
+context-window safety.
 """
 
-from typing import Any
+from __future__ import annotations
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
+from typing import Any, Literal
 
-from app.core.config import settings
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.rag.chunking.base import BaseChunkingStrategy, Chunk
+from app.rag.chunking.langchain_adapter import (
+    FlexSearchEmbeddings,
+    documents_to_chunks,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
 
+BreakpointType = Literal[
+    "percentile",
+    "standard_deviation",
+    "interquartile",
+    "gradient",
+]
+
 
 class SemanticChunking(BaseChunkingStrategy):
-    """Semantic chunking based on embedding similarity."""
+    """Embedding-based semantic splitting (LangChain SemanticChunker)."""
 
     def __init__(
         self,
         similarity_threshold: float = 0.5,
         min_chunk_size: int = 100,
         max_chunk_size: int = 1000,
+        *,
+        breakpoint_threshold_type: BreakpointType = "percentile",
+        buffer_size: int = 1,
     ) -> None:
-        """
-        Initialize semantic chunking.
-
-        Args:
-            similarity_threshold: Cosine similarity threshold for grouping
-            min_chunk_size: Minimum chunk size in characters
-            max_chunk_size: Maximum chunk size in characters
-        """
         self._similarity_threshold = similarity_threshold
         self._min_chunk_size = min_chunk_size
         self._max_chunk_size = max_chunk_size
-        self._model: SentenceTransformer | None = None
+        self._breakpoint_threshold_type = breakpoint_threshold_type
+        self._buffer_size = buffer_size
 
-    def _get_model(self) -> SentenceTransformer:
-        """Lazy load the embedding model."""
-        if self._model is None:
-            self._model = SentenceTransformer(settings.embedding_model)
-        return self._model
+        # Map legacy similarity_threshold (higher = fewer breaks) onto SemanticChunker's
+        # distance breakpoint amount. For percentile: amount ≈ (1 - sim) * 100.
+        amount = max(1.0, min(99.0, (1.0 - similarity_threshold) * 100.0))
+        self._embeddings = FlexSearchEmbeddings()
+        self._splitter = SemanticChunker(
+            embeddings=self._embeddings,
+            buffer_size=buffer_size,
+            add_start_index=True,
+            breakpoint_threshold_type=breakpoint_threshold_type,
+            breakpoint_threshold_amount=amount,
+            min_chunk_size=min_chunk_size,
+        )
+        self._cap_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max_chunk_size,
+            chunk_overlap=min(50, max(0, max_chunk_size // 10)),
+            length_function=len,
+            add_start_index=True,
+            strip_whitespace=True,
+        )
 
     @property
     def name(self) -> str:
@@ -54,112 +79,33 @@ class SemanticChunking(BaseChunkingStrategy):
         document_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> list[Chunk]:
-        """Split text based on semantic similarity."""
         if not text.strip():
             return []
 
-        # Split into sentences first
-        sentences = self._split_sentences(text)
-        if not sentences:
-            return []
-
-        # Get embeddings for each sentence
-        model = self._get_model()
-        embeddings = model.encode(sentences, convert_to_numpy=True)
-
-        # Group sentences by semantic similarity
-        groups = self._group_by_similarity(sentences, embeddings)
-
-        # Create chunks from groups
-        chunks = []
-        current_pos = 0
-
-        for idx, group in enumerate(groups):
-            chunk_text = " ".join(group).strip()
-            if not chunk_text:
+        docs = self._splitter.create_documents([text])
+        # Cap oversized semantic groups for embedding / context limits
+        capped: list = []
+        for doc in docs:
+            content = doc.page_content or ""
+            base_start = int(doc.metadata.get("start_index", 0) or 0)
+            if len(content) <= self._max_chunk_size:
+                capped.append(doc)
                 continue
+            sub_docs = self._cap_splitter.create_documents([content])
+            for sub in sub_docs:
+                rel = int(sub.metadata.get("start_index", 0) or 0)
+                sub.metadata["start_index"] = base_start + rel
+                capped.append(sub)
 
-            start = text.find(chunk_text[:50], current_pos)
-            if start == -1:
-                start = current_pos
-            end = start + len(chunk_text)
-
-            chunks.append(
-                Chunk(
-                    content=chunk_text,
-                    document_id=document_id,
-                    chunk_index=idx,
-                    start_char=start,
-                    end_char=end,
-                    metadata=metadata or {},
-                )
-            )
-            current_pos = start + 1
-
+        chunks = documents_to_chunks(
+            capped,
+            source_text=text,
+            document_id=document_id,
+            metadata=metadata,
+        )
         logger.debug(
-            f"Created {len(chunks)} semantic chunks from document {document_id}"
+            "Created %d semantic chunks from document %s",
+            len(chunks),
+            document_id,
         )
         return chunks
-
-    def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences."""
-        import re
-
-        # Simple sentence splitting
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        return [s.strip() for s in sentences if s.strip()]
-
-    def _cosine_similarity(
-        self,
-        a: np.ndarray,
-        b: np.ndarray,
-    ) -> float:
-        """Calculate cosine similarity between two vectors."""
-        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-    def _group_by_similarity(
-        self,
-        sentences: list[str],
-        embeddings: np.ndarray,
-    ) -> list[list[str]]:
-        """Group sentences by semantic similarity."""
-        if len(sentences) == 0:
-            return []
-        if len(sentences) == 1:
-            return [sentences]
-
-        groups: list[list[str]] = []
-        current_group: list[str] = [sentences[0]]
-        current_length = len(sentences[0])
-
-        for i in range(1, len(sentences)):
-            sentence = sentences[i]
-
-            # Check similarity with previous sentence
-            similarity = self._cosine_similarity(embeddings[i], embeddings[i - 1])
-
-            # Check if should start new group
-            new_length = current_length + len(sentence) + 1
-
-            if (
-                similarity >= self._similarity_threshold
-                and new_length <= self._max_chunk_size
-            ):
-                current_group.append(sentence)
-                current_length = new_length
-            else:
-                # Start new group if current meets minimum size
-                if current_length >= self._min_chunk_size:
-                    groups.append(current_group)
-                    current_group = [sentence]
-                    current_length = len(sentence)
-                else:
-                    # Keep adding to current group
-                    current_group.append(sentence)
-                    current_length += len(sentence) + 1
-
-        # Add final group
-        if current_group:
-            groups.append(current_group)
-
-        return groups

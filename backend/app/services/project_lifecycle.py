@@ -14,6 +14,8 @@ from app.services.document_storage import extracted_md_key, extracted_meta_key
 from app.services.document_worker import get_project_rag_context
 from app.services.project_index_service import wipe_index_for_mode
 from app.services.storage import get_storage_service
+from app.services.document_tasks import cancel_document_ingest
+from app.services.summary_tasks import cancel_document_summary
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -39,6 +41,8 @@ async def delete_document_fully(
                 logger.warning("Failed to delete %s: %s", path, exc)
 
     try:
+        cancel_document_ingest(document.id)
+        cancel_document_summary(document.id)
         rag_mode, rag_config, _ = await get_project_rag_context(db, project_id)
         create_pipeline(rag_config, rag_mode=rag_mode).delete_document_data(
             str(document.id), project_id=str(project_id)

@@ -15,6 +15,7 @@ class GraphIndexState(BaseModel):
     backend: GraphBackend | None = None
     status: GraphIndexStatusValue = "pending"
     indexed_at: datetime | str | None = None
+    indexing_started_at: datetime | str | None = None
     fingerprint: str | None = None
     error: str | None = None
     document_count: int | None = None

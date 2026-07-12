@@ -10,7 +10,12 @@ from app.rag.chunking import (
     RecursiveChunking,
     SemanticChunking,
 )
-from app.rag.ingestion import OCRExtractionStrategy, VLMExtractionStrategy
+from app.rag.ingestion import (
+    DoclingExtractionStrategy,
+    HybridPdfExtractionStrategy,
+    OCRExtractionStrategy,
+    VLMExtractionStrategy,
+)
 from app.rag.ingestion.base import BaseExtractionStrategy
 from app.rag.reranking import BaseRerankingStrategy, CrossEncoderReranking, NoReranking
 from app.rag.retrieval import (
@@ -25,9 +30,11 @@ from app.rag.retrieval import (
 from app.schemas.rag_config import (
     ChunkingConfig,
     ExtractionConfig,
+    GraphEffectiveRagConfig,
     GraphExtractionConfig,
     GraphRagConfig,
     GraphRetrievalConfig,
+    HierarchyRetrievalMode,
     RerankingConfig,
     RetrievalConfig,
     VectorRagConfig,
@@ -37,9 +44,15 @@ from app.schemas.rag_config import (
 def build_extraction_strategy(
     config: ExtractionConfig | GraphExtractionConfig,
 ) -> BaseExtractionStrategy:
-    if config.strategy == "vlm":
-        return VLMExtractionStrategy()
-    return OCRExtractionStrategy()
+    match config.strategy:
+        case "vlm":
+            return VLMExtractionStrategy()
+        case "docling":
+            return DoclingExtractionStrategy()
+        case "hybrid_pdf":
+            return HybridPdfExtractionStrategy()
+        case _:
+            return OCRExtractionStrategy()
 
 
 def build_chunking_strategy(config: ChunkingConfig) -> BaseChunkingStrategy:
@@ -49,12 +62,17 @@ def build_chunking_strategy(config: ChunkingConfig) -> BaseChunkingStrategy:
             return RecursiveChunking(
                 chunk_size=params.chunk_size,
                 overlap=params.overlap,
+                preserve_structure=getattr(params, "preserve_structure", True),
             )
         case "semantic":
             return SemanticChunking(
                 similarity_threshold=params.similarity_threshold,
                 min_chunk_size=params.min_chunk_size,
                 max_chunk_size=params.max_chunk_size,
+                breakpoint_threshold_type=getattr(
+                    params, "breakpoint_threshold_type", "percentile"
+                ),
+                buffer_size=getattr(params, "buffer_size", 1),
             )
         case "parent_child":
             return ParentChildChunking(
@@ -73,25 +91,31 @@ def build_retrieval_strategy(
     config: RetrievalConfig,
     *,
     rag_mode: RagMode = RagMode.VECTOR,
+    hierarchy_mode: HierarchyRetrievalMode = "chunks_only",
 ) -> BaseRetrievalStrategy:
     if rag_mode == RagMode.GRAPH:
         raise ValueError("Use build_graph_retrieval_strategy for graph projects")
     params = config.resolved_params()
     match config.strategy:
         case "parent_child":
-            return ParentChildRetrieval()
+            return ParentChildRetrieval(hierarchy_mode=hierarchy_mode)
         case "hybrid":
-            return HybridRetrieval(rrf_k=params.rrf_k)
+            return HybridRetrieval(rrf_k=params.rrf_k, hierarchy_mode=hierarchy_mode)
         case "bm25":
-            return SparseRetrieval(k1=params.k1, b=params.b)
+            return SparseRetrieval(
+                k1=params.k1, b=params.b, hierarchy_mode=hierarchy_mode
+            )
         case _:
-            return DenseRetrieval(score_threshold=params.score_threshold)
+            return DenseRetrieval(
+                score_threshold=params.score_threshold,
+                hierarchy_mode=hierarchy_mode,
+            )
 
 
 def build_graph_retrieval_strategy(
-    config: GraphRagConfig | GraphRetrievalConfig,
+    config: GraphRagConfig | GraphEffectiveRagConfig | GraphRetrievalConfig,
 ) -> BaseRetrievalStrategy:
-    if isinstance(config, GraphRagConfig):
+    if isinstance(config, (GraphRagConfig, GraphEffectiveRagConfig)):
         graph_backend = config.graph_backend
         retrieval = config.retrieval
     else:
@@ -156,9 +180,14 @@ def build_pipeline_strategies(
             NoReranking(),
         )
     assert isinstance(rag_config, VectorRagConfig)
+    hierarchy_mode = rag_config.summaries.retrieval_mode
     return (
         extraction,
         build_chunking_strategy(rag_config.chunking),
-        build_retrieval_strategy(rag_config.retrieval, rag_mode=rag_mode),
+        build_retrieval_strategy(
+            rag_config.retrieval,
+            rag_mode=rag_mode,
+            hierarchy_mode=hierarchy_mode,
+        ),
         build_reranking_strategy(rag_config.reranking, rag_mode=rag_mode),
     )
