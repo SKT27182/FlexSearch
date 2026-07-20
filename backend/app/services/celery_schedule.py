@@ -70,7 +70,20 @@ def prepare_reusable_task_id(
         return task_id
 
     if state in RUNNING:
-        return None
+        # STARTED/RECEIVED in Redis can be a ghost after worker crash/restart.
+        # Only coalesce when a live worker still lists the task.
+        if celery_task_known_to_workers(task_id, app):
+            return None
+        logger.warning(
+            "Stale Celery state=%s for %s (not on any worker); re-enqueueing",
+            state,
+            task_id,
+        )
+        try:
+            existing.forget()
+        except Exception:
+            pass
+        return f"{task_id}:{uuid4().hex[:8]}"
 
     known = celery_task_known_to_workers(task_id, app)
     if state == "PENDING" and known:
@@ -89,8 +102,11 @@ def prepare_reusable_task_id(
             existing.forget()
         except Exception:
             pass
+        # REVOKED ids stay blacklisted on workers — never reuse them.
+        if state == "REVOKED":
+            return f"{task_id}:{uuid4().hex[:8]}"
 
-    # Unknown PENDING (never scheduled) or cleared terminal — safe to reuse id.
+    # Unknown PENDING (never scheduled) or cleared SUCCESS/FAILURE — safe to reuse id.
     # Do NOT revoke: that blacklists the id and the next apply_async is discarded.
     return task_id
 
@@ -128,4 +144,6 @@ def prepare_replace_task_id(task_id: str, app: Any) -> str:
             existing.forget()
         except Exception:
             pass
+        if state == "REVOKED":
+            return f"{task_id}:{uuid4().hex[:8]}"
     return task_id

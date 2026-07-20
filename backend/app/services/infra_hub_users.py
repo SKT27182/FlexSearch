@@ -1,4 +1,4 @@
-"""Read-only access to infra-hub users in main_db (no data copied to FlexSearch)."""
+"""Read-only access to infra-hub users in main_db (no credentials stored in FlexSearch)."""
 
 from dataclasses import dataclass
 
@@ -13,7 +13,7 @@ logger = create_logger(__name__)
 
 @dataclass(frozen=True)
 class InfraHubUser:
-    """Minimal view of an infra-hub main_db user."""
+    """Minimal view of an infra-hub main_db user (infra-hub is admin-only)."""
 
     id: int
     email: str
@@ -54,7 +54,11 @@ async def get_infra_hub_user_by_email(email: str) -> InfraHubUser | None:
 
 
 async def verify_infra_hub_credentials(email: str, password: str) -> InfraHubUser | None:
-    """True when email exists in main_db.users and password matches."""
+    """Authenticate any active infra-hub user against main_db (read-only).
+
+    FlexSearch never stores ADMIN_EMAIL / ADMIN_PASSWORD. Every active infra-hub
+    user can log into FlexSearch and is linked as INFRA_ADMIN.
+    """
     user = await get_infra_hub_user_by_email(email)
     if user is None or not user.is_active:
         return None

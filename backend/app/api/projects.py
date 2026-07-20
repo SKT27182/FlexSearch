@@ -200,15 +200,14 @@ async def reindex_project(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     docs_result = await db.execute(
-        select(Document).where(
-            Document.project_id == project_id,
-            Document.status == DocumentStatus.COMPLETED,
-        )
+        select(Document).where(Document.project_id == project_id)
     )
     documents = docs_result.scalars().all()
     mode = ReindexMode(body.mode)
     force = mode == ReindexMode.FULL
 
+    # Include stuck/failed/in-progress docs — COMPLETED-only left ghosts after
+    # worker crashes (UI stuck at extracting 40%, reindex no-ops).
     for doc in documents:
         schedule_process_document(
             doc.id,

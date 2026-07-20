@@ -14,16 +14,22 @@ logger = create_logger(__name__)
 def _run_async(coro):
     """Run an async coroutine from a sync Celery worker process.
 
-    ``asyncio.run`` creates a new event loop per call. The global SQLAlchemy
-    async engine keeps pool connections bound to the previous loop, which
-    causes ``Future attached to a different loop`` on the 2nd+ task. Dispose
-    the engine after each run so the next task opens fresh connections.
+    ``asyncio.run`` creates a new event loop per call. Global SQLAlchemy and
+    Redis clients keep connections bound to that loop, so both must be closed
+    before the loop ends. Otherwise the next task can reuse a client attached
+    to a closed loop.
     """
 
     async def _wrapper():
         try:
             return await coro
         finally:
+            try:
+                from app.services.redis_client import close_redis
+
+                await close_redis()
+            except Exception:
+                logger.debug("close_redis() after Celery task failed", exc_info=True)
             try:
                 from app.db.postgres import engine
 

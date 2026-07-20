@@ -1,6 +1,6 @@
 """Bridge third-party loggers into the FlexSearch colored / unified logging stack.
 
-Dev runs tee stdout to ``~/.local/share/dev-logs/flexsearch/backend.log`` via the
+Dev runs tee stdout to ``~/.local/share/projects/flexsearch/dev-logs/backend.log`` via the
 Makefile, but GraphRAG's ``init_loggers`` writes only to a workspace-local file
 (``indexing-engine.log``), so extraction errors never appeared in the backend log.
 This module attaches a shared file handler on the root logger and routes GraphRAG,
@@ -39,7 +39,7 @@ def backend_log_path() -> Path:
     if explicit:
         return Path(explicit).expanduser()
     return (
-        Path.home() / ".local" / "share" / "dev-logs" / "flexsearch" / "backend.log"
+        Path.home() / ".local" / "share" / "projects" / "flexsearch" / "dev-logs" / "backend.log"
     )
 
 

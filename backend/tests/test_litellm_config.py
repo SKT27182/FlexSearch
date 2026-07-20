@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -152,6 +153,7 @@ def test_llm_endpoint_includes_api_base(
 
 def test_configure_litellm_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.litellm_config._configured", False)
+    monkeypatch.delenv("LITELLM_LOG", raising=False)
     monkeypatch.setattr(
         "app.services.litellm_config.settings",
         Settings(
@@ -164,9 +166,20 @@ def test_configure_litellm_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     configure_litellm()
-    assert litellm.set_verbose is True
+    assert os.environ["LITELLM_LOG"] == "DEBUG"
+    assert litellm.set_verbose is False
     configure_litellm()
-    assert litellm.set_verbose is True
+    assert os.environ["LITELLM_LOG"] == "DEBUG"
+    assert litellm.set_verbose is False
+
+
+def test_configure_litellm_preserves_explicit_log_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.litellm_config._configured", False)
+    monkeypatch.setenv("LITELLM_LOG", "ERROR")
+    configure_litellm()
+    assert os.environ["LITELLM_LOG"] == "ERROR"
 
 
 def test_optional_aws_preload_filter_installed() -> None:

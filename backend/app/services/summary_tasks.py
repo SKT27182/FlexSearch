@@ -40,16 +40,18 @@ def schedule_document_summary(
 ) -> str | None:
     """Enqueue hierarchical summary build for a vector document.
 
-    Always replaces a prior task for this document (including RUNNING). Reindex
-    must be able to schedule a fresh build after wiping chunks; coalescing on
-    STARTED would leave summaries missing or stale.
-
-    After revoke, uses a fresh task id so workers do not discard the enqueue.
+    Always uses a fresh task id. ``cancel_document_summary`` revokes the base
+    id, and Celery workers blacklist revoked ids — reusing ``summary:{doc}``
+    causes ``Discarding revoked task`` and missing summaries after reindex.
     """
+    from uuid import uuid4
+
     from app.services.celery_tasks import build_document_summaries_task
 
     base_id = _summary_task_id(document_id)
-    task_id = prepare_replace_task_id(base_id, build_document_summaries_task.app)
+    # Revoke any live base-id task, then enqueue under a never-revoked id.
+    prepare_replace_task_id(base_id, build_document_summaries_task.app)
+    task_id = f"{base_id}:{uuid4().hex[:8]}"
 
     async_result = build_document_summaries_task.apply_async(
         args=[str(document_id), str(project_id)],

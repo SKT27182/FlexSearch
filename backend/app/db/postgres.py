@@ -91,12 +91,16 @@ async def _upgrade_user_name(conn) -> None:
 
 async def _upgrade_user_hierarchy(conn) -> None:
     """Add INFRA_ADMIN role and infra_hub_user_id for existing deployments."""
+    # create_all may not have run yet on a partially migrated DB; create the
+    # enum if missing, otherwise only ADD VALUE when INFRA_ADMIN is absent.
     await conn.execute(
         text(
             """
             DO $$
             BEGIN
-                IF NOT EXISTS (
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'userrole') THEN
+                    CREATE TYPE userrole AS ENUM ('USER', 'ADMIN', 'INFRA_ADMIN');
+                ELSIF NOT EXISTS (
                     SELECT 1 FROM pg_type t
                     JOIN pg_enum e ON t.oid = e.enumtypid
                     WHERE t.typname = 'userrole' AND e.enumlabel = 'INFRA_ADMIN'

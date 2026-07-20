@@ -467,7 +467,7 @@ Implemented in `app/api/chat.py` (`_ensure_graph_ready`) and `app/api/retrieval.
 | Variable | Default | Purpose |
 |---|---|---|
 | `NEO4J_URI` | `bolt://localhost:7687` | Bolt endpoint |
-| `NEO4J_USER` / `NEO4J_PASSWORD` | `neo4j` / `password` | Auth |
+| `NEO4J_USER` / `NEO4J_PASSWORD` | from `.env` (match infra-hub) | Auth |
 | `NEO4J_HTTP_PORT` | 7474 | Browser (ops) |
 | `GRAPH_INDEXING_ENABLED` | `true` | Kill switch for Microsoft builds |
 | `GRAPHRAG_COMMUNITY_LEVEL` | `2` | Default community level |

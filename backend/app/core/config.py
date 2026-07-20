@@ -179,7 +179,6 @@ class Settings(BaseSettings):
         description="Redis port (infra-hub REDIS_PORT, host-mapped)",
     )
     redis_password: str = Field(
-        default="password",
         description="Redis password (infra-hub REDIS_PASSWORD)",
     )
     redis_db: int = Field(
@@ -268,12 +267,10 @@ class Settings(BaseSettings):
         description="Neo4j Bolt URI",
     )
     neo4j_user: str = Field(
-        default="neo4j",
-        description="Neo4j username",
+        description="Neo4j username (must match infra-hub NEO4J_USER)",
     )
     neo4j_password: str = Field(
-        default="password",
-        description="Neo4j password",
+        description="Neo4j password (must match infra-hub NEO4J_PASSWORD)",
     )
     neo4j_http_port: int = Field(
         default=7474,

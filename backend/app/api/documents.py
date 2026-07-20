@@ -33,7 +33,7 @@ from app.services.document_tasks import (
 from app.services.project_access import user_can_access_project
 from app.services.storage import get_storage_service
 from app.rag.pipeline import create_pipeline
-from app.services.document_worker import get_project_rag_context
+from app.services.document_worker import ReindexMode, get_project_rag_context
 from app.services.summary_tasks import cancel_document_summary
 from app.utils.logger import create_logger
 
@@ -276,6 +276,7 @@ async def retry_document_processing(
         document.id,
         project_id,
         force_full_extract=True,
+        mode=ReindexMode.FULL,
     )
     return DocumentResponse.model_validate(document)
 

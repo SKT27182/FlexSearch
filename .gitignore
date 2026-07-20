@@ -54,3 +54,4 @@ docker/data/
 *.bak
 *.tmp
 .pytest_cache
+.cursor

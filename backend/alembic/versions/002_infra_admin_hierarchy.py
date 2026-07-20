@@ -15,11 +15,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Safe on fresh DBs (init_db may already have created the enum + column).
     op.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'userrole') THEN
+                CREATE TYPE userrole AS ENUM ('USER', 'ADMIN', 'INFRA_ADMIN');
+            ELSIF NOT EXISTS (
                 SELECT 1 FROM pg_type t
                 JOIN pg_enum e ON t.oid = e.enumtypid
                 WHERE t.typname = 'userrole' AND e.enumlabel = 'INFRA_ADMIN'

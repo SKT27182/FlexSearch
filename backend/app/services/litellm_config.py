@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 from app.core.config import settings
@@ -15,6 +16,11 @@ _AWS_PRELOAD_MARKERS = (
     "could not pre-load bedrock-runtime",
     "could not pre-load sagemaker-runtime",
 )
+
+
+def _configure_litellm_log_level() -> None:
+    """Set LiteLLM's supported log control without overriding user config."""
+    os.environ.setdefault("LITELLM_LOG", "DEBUG" if settings.debug else "INFO")
 
 
 class _SuppressOptionalAwsPreload(logging.Filter):
@@ -33,8 +39,9 @@ def _install_optional_aws_warning_filter() -> None:
 
 
 _install_optional_aws_warning_filter()
+_configure_litellm_log_level()
 
-import litellm  # noqa: E402  — filter must be registered before this import
+import litellm  # noqa: E402, F401  — configure/filter before this import
 
 _configured = False
 
@@ -43,9 +50,9 @@ def configure_litellm() -> None:
     """Idempotent global LiteLLM config (verbosity + noise filters)."""
     global _configured
     _install_optional_aws_warning_filter()
+    _configure_litellm_log_level()
     if _configured:
         return
-    litellm.set_verbose = settings.debug
     _configured = True
 
 

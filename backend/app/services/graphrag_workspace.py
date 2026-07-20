@@ -37,7 +37,7 @@ class _LoggingWorkflowCallbacks:
     """Forward GraphRAG pipeline/workflow events to our logger.
 
     Implements the GraphRAG ``WorkflowCallbacks`` protocol so a long Microsoft
-    GraphRAG build is visible in ``~/.local/share/dev-logs/flexsearch/backend.log``
+    GraphRAG build is visible in ``~/.local/share/projects/flexsearch/dev-logs/backend.log``
     instead of silent. The callbacks run inside the stdlib-loop worker thread,
     so we rely on the thread-safe stdlib logging behind ``create_logger`` and
     keep messages concise. Signatures must match the protocol exactly — e.g.

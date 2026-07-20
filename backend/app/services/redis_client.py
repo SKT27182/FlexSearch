@@ -37,7 +37,13 @@ async def get_redis() -> aioredis.Redis | None:
 
 async def close_redis() -> None:
     global _pool, _available
-    if _pool is not None:
-        await _pool.aclose()
-        _pool = None
+    client = _pool
+    # Detach first so a close failure cannot leave a client from a dead event
+    # loop cached for the next Celery task.
+    _pool = None
     _available = None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            logger.debug("Redis cleanup failed: %s", exc)

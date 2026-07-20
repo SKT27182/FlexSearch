@@ -20,7 +20,7 @@ async def get_or_create_infra_linked_user(
     db: AsyncSession,
     infra_user: InfraHubUser,
 ) -> User:
-    """Ensure a FlexSearch row exists for an infra-hub admin (link only, no password copy)."""
+    """Ensure a FlexSearch row exists for an infra-hub user (link only)."""
     result = await db.execute(select(User).where(User.email == infra_user.email))
     user = result.scalar_one_or_none()
 
@@ -53,8 +53,11 @@ async def authenticate_user(
 ) -> User | None:
     """
     Authenticate with hierarchy:
-    1. infra-hub main_db.users (read-only) -> INFRA_ADMIN in FlexSearch
+    1. Any active infra-hub main_db user (read-only) -> INFRA_ADMIN in FlexSearch
     2. FlexSearch-local users -> USER or ADMIN
+
+    No admin email/password is configured in FlexSearch; infra-hub is the source
+    of truth for platform admins (infra-hub is admin-only).
     """
     infra_user = await verify_infra_hub_credentials(email, password)
     if infra_user is not None:
