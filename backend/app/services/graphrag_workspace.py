@@ -122,8 +122,8 @@ GRAPHML_CANDIDATES = (
 )
 
 
-def graphrag_storage_prefix(project_id: UUID | str) -> str:
-    return f"projects/{project_id}/graphrag"
+def graphrag_storage_prefix(project_id: UUID | str, generation: int) -> str:
+    return f"projects/{project_id}/graphrag/generations/{generation}"
 
 
 def _set_graphrag_runtime_env() -> None:
@@ -218,8 +218,7 @@ def _patch_graphrag_runtime_settings(content: str) -> str:
         idx = content.find(marker)
         if idx == -1:
             content = (
-                f"concurrent_requests: {concurrent}\n"
-                f"async_mode: threaded\n\n{content}"
+                f"concurrent_requests: {concurrent}\nasync_mode: threaded\n\n{content}"
             )
         else:
             content = (
@@ -325,8 +324,8 @@ def _needs_config_refresh(root: Path) -> bool:
 class GraphRAGWorkspace:
     """Manage GraphRAG file workspace backed by MinIO."""
 
-    def __init__(self) -> None:
-        self._storage = get_storage_service()
+    def __init__(self, storage=None) -> None:
+        self._storage = storage if storage is not None else get_storage_service()
 
     def _bootstrap_workspace_sync(self, root: Path, *, force: bool = False) -> None:
         """Write GraphRAG 3.x settings.yaml and prompt files (stdlib loop thread only)."""
@@ -361,15 +360,19 @@ class GraphRAGWorkspace:
         """Sync bootstrap for tests; production code should use materialize()."""
         self._bootstrap_workspace_sync(root, force=force)
 
-    def sync_from_minio(self, project_id: UUID | str, root: Path) -> bool:
-        prefix = graphrag_storage_prefix(project_id)
+    def sync_from_minio(
+        self, project_id: UUID | str, generation: int, root: Path
+    ) -> bool:
+        prefix = graphrag_storage_prefix(project_id, generation)
         if not self._storage.list_files(prefix):
             return False
         self._storage.download_prefix(prefix, str(root))
         return True
 
-    def sync_to_minio(self, project_id: UUID | str, root: Path) -> None:
-        prefix = graphrag_storage_prefix(project_id)
+    def sync_to_minio(
+        self, project_id: UUID | str, generation: int, root: Path
+    ) -> None:
+        prefix = graphrag_storage_prefix(project_id, generation)
         for sub in ("input", "output", "cache", "prompts", "logs"):
             sub_path = root / sub
             if sub_path.exists():
@@ -382,9 +385,9 @@ class GraphRAGWorkspace:
                 content_type="application/x-yaml",
             )
 
-    async def materialize(self, project_id: UUID | str) -> Path:
+    async def materialize(self, project_id: UUID | str, generation: int) -> Path:
         root = Path(tempfile.mkdtemp(prefix=f"graphrag-{project_id}-"))
-        synced = self.sync_from_minio(project_id, root)
+        synced = self.sync_from_minio(project_id, generation, root)
         force = not synced or _needs_config_refresh(root)
         logger.info(
             "Materializing GraphRAG workspace for project %s (synced=%s, force=%s)",
@@ -425,36 +428,41 @@ class GraphRAGWorkspace:
         *,
         is_update: bool = False,
         manage_in_flight: bool = True,
+        generation: int | None = None,
     ) -> None:
         if not settings.graph_indexing_enabled:
             logger.info("Graph indexing disabled globally; skip project %s", project_id)
             return
 
-        # Per-project concurrency guard: a second build for the same project
-        # (e.g. from a debounce race after two documents finish) must not run
-        # while one is already in flight.
-        # When called from Celery rebuild_graph_index_task, the task already
-        # holds _in_flight — pass manage_in_flight=False to avoid a no-op skip.
-        from app.services.graph_index_tasks import (
-            _acquire_in_flight,
-            _release_in_flight,
-        )
-
-        acquired = False
         if manage_in_flight:
-            acquired = _acquire_in_flight(project_id)
-            if not acquired:
-                logger.info(
-                    "Skipping GraphRAG build for project %s; another build is in flight",
+            from app.services.distributed_lock import project_graph_lease
+
+            async with async_session_maker() as db:
+                project = await _get_project(db, project_id)
+                expected_generation = generation or project.rag_generation
+            async with project_graph_lease(
+                str(project_id), expected_generation
+            ) as acquired:
+                if not acquired:
+                    logger.info("GraphRAG build coalesced for %s", project_id)
+                    return
+                await self.build_index_for_project(
                     project_id,
+                    is_update=is_update,
+                    manage_in_flight=False,
+                    generation=expected_generation,
                 )
                 return
 
         root: Path | None = None
         start_ts = time.monotonic()
+        expected_generation = generation or 0
         try:
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
+                expected_generation = generation or project.rag_generation
+                if expected_generation != project.rag_generation:
+                    return
                 if project.rag_mode != RagMode.GRAPH:
                     return
                 rag_config = AppGraphRagConfig.from_db(project.rag_config)
@@ -507,7 +515,7 @@ class GraphRAGWorkspace:
                 rag_config.microsoft_indexing.method,
                 is_update,
             )
-            root = await self.materialize(project_id)
+            root = await self.materialize(project_id, expected_generation)
             df = pd.DataFrame(docs)
             root_path = root
             method_name = rag_config.microsoft_indexing.method
@@ -545,10 +553,19 @@ class GraphRAGWorkspace:
             input_csv.parent.mkdir(parents=True, exist_ok=True)
             df.to_csv(input_csv, index=False)
 
-            self.sync_to_minio(project_id, root)
+            async with async_session_maker() as db:
+                current = await _get_project(db, project_id)
+                if current.rag_generation != expected_generation:
+                    logger.info(
+                        "Discarding stale GraphRAG generation %s", expected_generation
+                    )
+                    return
+            self.sync_to_minio(project_id, expected_generation, root)
 
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
+                if project.rag_generation != expected_generation:
+                    return
                 project.graph_index_status = GraphIndexState(
                     backend="microsoft",
                     status="ready",
@@ -575,6 +592,8 @@ class GraphRAGWorkspace:
             )
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
+                if project.rag_generation != expected_generation:
+                    return
                 prev = GraphIndexState.from_db(project.graph_index_status)
                 project.graph_index_status = GraphIndexState(
                     backend="microsoft",
@@ -588,8 +607,6 @@ class GraphRAGWorkspace:
             logger.info("Graph index status -> failed for project %s", project_id)
             raise
         finally:
-            if acquired:
-                _release_in_flight(project_id)
             if root is not None:
                 self.cleanup(root)
 
@@ -600,8 +617,9 @@ class GraphRAGWorkspace:
         *,
         community_level: int,
         top_k: int,
+        generation: int,
     ) -> list[Any]:
-        root = await self.materialize(project_id)
+        root = await self.materialize(project_id, generation)
         try:
             root_path = root
             tables = self.load_parquet_tables(root)
@@ -617,6 +635,7 @@ class GraphRAGWorkspace:
                 raise FileNotFoundError(
                     f"Graph index missing tables: {', '.join(missing)}"
                 )
+
             async def _search() -> tuple[Any, list[Any]]:
                 from graphrag.api import local_search
                 from graphrag.config.load_config import load_config
@@ -649,8 +668,9 @@ class GraphRAGWorkspace:
         community_level: int,
         dynamic_community_selection: bool,
         top_k: int,
+        generation: int,
     ) -> list[Any]:
-        root = await self.materialize(project_id)
+        root = await self.materialize(project_id, generation)
         try:
             root_path = root
             tables = self.load_parquet_tables(root)
@@ -660,6 +680,7 @@ class GraphRAGWorkspace:
                 raise FileNotFoundError(
                     f"Graph index missing tables: {', '.join(missing)}"
                 )
+
             async def _search() -> tuple[Any, list[Any]]:
                 from graphrag.api import global_search
                 from graphrag.config.load_config import load_config

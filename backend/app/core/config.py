@@ -6,11 +6,14 @@ from this file - never use os.getenv() directly elsewhere.
 """
 
 import json
+import os
+from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import quote_plus, urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import dotenv_values
 
 from app.services.model_ids import is_local_embedding_model
 
@@ -42,6 +45,13 @@ class Settings(BaseSettings):
         default=None,
         description="Full PostgreSQL connection URL (overrides individual components if provided)",
     )
+    postgres_admin_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Deployment-only PostgreSQL URL with CREATE DATABASE/schema privileges; "
+            "never supply it to API or worker runtimes"
+        ),
+    )
 
     # infra-hub main_db (read-only for admin auth; credentials never stored in FlexSearch)
     infra_hub_postgres_db: str = Field(default="main_db")
@@ -63,9 +73,9 @@ class Settings(BaseSettings):
             base = make_url(self.postgres_url)
             infra = base.set(database=self.infra_hub_postgres_db)
             driver = infra.drivername.split("+", 1)[0]
-            self.infra_hub_postgres_url = infra.set(
-                drivername=driver
-            ).render_as_string(hide_password=False)
+            self.infra_hub_postgres_url = infra.set(drivername=driver).render_as_string(
+                hide_password=False
+            )
 
         if not self.redis_url:
             pwd = quote_plus(self.redis_password)
@@ -222,6 +232,15 @@ class Settings(BaseSettings):
         default=True,
         description="Reject crawl/bulk URLs that resolve to private/loopback IPs (SSRF)",
     )
+    direct_upload_max_bytes: int = Field(default=100 * 1024 * 1024, ge=1)
+    ragpack_upload_max_bytes: int = Field(default=250 * 1024 * 1024, ge=1)
+    remote_response_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
+    archive_expanded_max_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
+    archive_member_max_bytes: int = Field(default=100 * 1024 * 1024, ge=1)
+    archive_max_entries: int = Field(default=2000, ge=1, le=10000)
+    archive_max_compression_ratio: float = Field(default=100.0, ge=1.0)
+    pdf_max_pages: int = Field(default=500, ge=1, le=5000)
+    image_max_pixels: int = Field(default=100_000_000, ge=1)
 
     # =========================================================================
     # RATE LIMITS (Phase 5 — sensitive APIs)
@@ -250,6 +269,8 @@ class Settings(BaseSettings):
         ge=0,
         description="Max other sensitive API requests per user per minute",
     )
+    rate_limit_login_per_minute: int = Field(default=10, ge=1)
+    rate_limit_register_per_minute: int = Field(default=5, ge=1)
 
     # =========================================================================
     # OBSERVABILITY (Phase 5)
@@ -288,7 +309,7 @@ class Settings(BaseSettings):
         description="JWT signing algorithm",
     )
     jwt_expire_minutes: int = Field(
-        default=60,
+        default=15,
         description="JWT token expiration in minutes",
     )
 
@@ -410,13 +431,18 @@ class Settings(BaseSettings):
     # =========================================================================
     # APPLICATION
     # =========================================================================
+    app_env: Literal["development", "test", "production"] = Field(default="development")
     debug: bool = Field(
-        default=True,
+        default=False,
         description="Debug mode",
     )
     api_port: int = Field(
         default=8889,
         description="Backend API port",
+    )
+    api_host: str = Field(
+        default="127.0.0.1",
+        description="Bind address when app.main is executed directly",
     )
     app_public_url: Optional[str] = Field(
         default=None,
@@ -448,6 +474,8 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level",
     )
+    log_path: str = Field(default="")
+    app_data_dir: str = Field(default="")
     sql_echo: bool = Field(
         default=False,
         description=(
@@ -456,6 +484,56 @@ class Settings(BaseSettings):
             "Never uses SQLAlchemy engine echo= (avoids duplicate white logs)."
         ),
     )
+    operations_token: str = Field(default="")
+
+    @model_validator(mode="after")
+    def validate_environment_security(self) -> "Settings":
+        obsolete_names = {"DATABASE_URL", "JWT_SECRET_KEY", "LLM_API_KEY"}
+        configured_names = set(os.environ)
+        for candidate in ("backend/.env", ".env", "../.env", "/app/.env"):
+            path = Path(candidate)
+            if path.is_file():
+                configured_names.update(dotenv_values(path))
+        obsolete = obsolete_names.intersection(configured_names)
+        if obsolete:
+            raise ValueError(
+                "Obsolete environment variables are not accepted: "
+                + ", ".join(sorted(obsolete))
+            )
+        if self.app_env != "production":
+            return self
+        errors: list[str] = []
+        if self.debug:
+            errors.append("DEBUG must be false")
+        if len(self.jwt_secret) < 32 or "change" in self.jwt_secret.lower():
+            errors.append("JWT_SECRET must be at least 32 characters and non-default")
+        if self.jwt_algorithm != "HS256":
+            errors.append("JWT_ALGORITHM must be HS256")
+        if not self.app_public_url or not self.app_public_url.startswith("https://"):
+            errors.append("APP_PUBLIC_URL must use HTTPS")
+        if not self.opensearch_use_ssl or not self.opensearch_verify_certs:
+            errors.append("OpenSearch TLS and certificate verification are required")
+        if len(self.operations_token) < 32:
+            errors.append("OPERATIONS_TOKEN must be at least 32 characters")
+        weak_values = {"password", "password123", "admin", "changeme", "secret"}
+        for name, value in {
+            "POSTGRES_PASSWORD": self.postgres_password,
+            "REDIS_PASSWORD": self.redis_password,
+            "MINIO_ACCESS_KEY": self.minio_access_key,
+            "MINIO_SECRET_KEY": self.minio_secret_key,
+            "NEO4J_PASSWORD": self.neo4j_password,
+        }.items():
+            if len(value) < 16 or value.lower() in weak_values:
+                errors.append(f"{name} must be strong and non-default")
+        if not self.minio_secure:
+            errors.append("MINIO_SECURE must be true")
+        if not self.opensearch_username or len(self.opensearch_password) < 16:
+            errors.append("Authenticated OpenSearch credentials are required")
+        if "*" in self.cors_origins_list:
+            errors.append("Wildcard CORS origins are forbidden")
+        if errors:
+            raise ValueError("Unsafe production configuration: " + "; ".join(errors))
+        return self
 
     @model_validator(mode="after")
     def apply_blank_env_defaults(self) -> "Settings":

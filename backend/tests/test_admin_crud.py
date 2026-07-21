@@ -28,14 +28,12 @@ async def test_delete_user_rejects_admin_target_from_app_admin():
         role=UserRole.ADMIN,
     )
     db = AsyncMock()
-    db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: target)
-    )
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: target))
 
     with pytest.raises(HTTPException) as exc:
         await admin_api.delete_user(target_id, current, db)
 
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -58,11 +56,9 @@ async def test_delete_user_rejects_infra_admin_target():
         infra_hub_user_id=2,
     )
     db = AsyncMock()
-    db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: target)
-    )
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: target))
 
     with pytest.raises(HTTPException) as exc:
         await admin_api.delete_user(target_id, current, db)
 
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404

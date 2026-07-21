@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 
@@ -47,6 +48,8 @@ class ChatAnswer:
     output_tokens: int = 0
     latency_ms: int = 0
     empty_retrieval: bool = False
+    grounded: bool = False
+    invalid_citations: list[int] = field(default_factory=list)
     debug: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,6 +65,8 @@ class ChatAnswer:
             "output_tokens": self.output_tokens,
             "latency_ms": self.latency_ms,
             "empty_retrieval": self.empty_retrieval,
+            "grounded": self.grounded,
+            "invalid_citations": self.invalid_citations,
         }
         if self.debug is not None:
             payload["debug"] = self.debug
@@ -107,3 +112,27 @@ def format_passages(citations: list[Citation]) -> list[dict[str, Any]]:
         }
         for c in citations
     ]
+
+
+_CITATION_MARKER = re.compile(r"\[(\d+)\]")
+
+
+def validate_answer_citations(
+    answer: str, citations: list[Citation]
+) -> tuple[str, list[int], bool]:
+    """Remove citation markers not present in the supplied retrieval context."""
+    valid = {citation.index for citation in citations}
+    invalid: list[int] = []
+    used_valid = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal used_valid
+        index = int(match.group(1))
+        if index in valid:
+            used_valid = True
+            return match.group(0)
+        invalid.append(index)
+        return ""
+
+    cleaned = _CITATION_MARKER.sub(replace, answer)
+    return cleaned, sorted(set(invalid)), bool(citations) and used_valid

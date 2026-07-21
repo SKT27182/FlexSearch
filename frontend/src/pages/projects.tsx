@@ -1,13 +1,11 @@
 import { useState } from 'react';
-import {
-  RagConfigForm,
-  projectModeToRagMode,
-} from '@/components/RagConfigForm';
+import { RagConfigForm } from '@/components/RagConfigForm';
 import type { ProjectMode, RagConfig } from '@/lib/rag-types';
 import {
   defaultConfigForProjectMode,
   getProjectMode,
   projectModeLabel,
+  projectModeToRagMode,
 } from '@/lib/rag-types';
 import { Link } from 'react-router-dom';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';

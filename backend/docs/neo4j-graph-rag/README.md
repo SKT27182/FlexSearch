@@ -372,7 +372,7 @@ Global kill switch: `GRAPH_INDEXING_ENABLED=false` skips builds without failing 
 
 `POST …/graph-index/rebuild` sets `indexing` and schedules Celery with `debounce_seconds=0`. Task always calls `build_index_for_project(..., is_update=True)`.
 
-> **Note:** Task owns `_in_flight` and passes `manage_in_flight=False` into the workspace — see [§10.2](#102-celery-double-_in_flight--fixed-process-local-remains).
+> **Note:** The task holds a renewable Redis lease and carries the PostgreSQL RAG generation as a fencing token — see §10.2.
 
 ---
 
@@ -639,7 +639,7 @@ After extract, `_handle_graph_after_extract`:
 
 If status is `indexing` but workers are dead (Celery inspect) or `indexing_started_at` older than ~70 minutes → mark `failed` with a rebuild hint.
 
-Microsoft aliveness: task id `graph_rebuild:{project_id}` + process `_in_flight`.  
+Microsoft aliveness: task id `graph_rebuild:{project_id}` + renewable Redis lease + database generation fence.
 Neo4j aliveness: `ingest:{document_id}:{mode}` for all project documents.
 
 ### Kill switches
@@ -657,7 +657,7 @@ Neo4j aliveness: `ingest:{document_id}:{mode}` for all project documents.
 | `GET` | `/projects/{id}/graph-index/status` | Reconcile stale → return status/fingerprint/counts/error |
 | `POST` | `/projects/{id}/graph-index/rebuild` | MS: Celery rebuild; Neo4j: re-ingest all from extracted |
 | `GET` | `/projects/{id}/graph-export` | **Microsoft only**, status must be `ready`; ZIP parquet + GraphML |
-| `PATCH` | `/projects/{id}/rag-mode` | Destructive switch; wipe old index; reset config/status; requeue docs |
+| `PATCH` | `/projects/{id}/rag-mode` | Return `202`; build generation-specific storage, atomically publish on success, then asynchronously remove the old generation |
 | Chat / retrieval | `/chat/…`, retrieval query | Graph strategy validation + readiness gates above |
 
 `GraphIndexStatusResponse` fields: `backend`, `status` (`pending|indexing|ready|failed|disabled`), `indexed_at`, `fingerprint`, `error`, `document_count`, `entity_count`, `passage_count`.
@@ -676,13 +676,13 @@ Bare `GraphRetrievalConfig` still defaults to neo4j (intentional for callers tha
 
 ---
 
-### 10.2 Celery double `_in_flight` — **fixed** (process-local remains)
+### 10.2 Distributed rebuild coordination and generation fencing
 
-**Was:** Task acquired `_in_flight`, then `build_index_for_project` saw it set and returned early (no-op skip).
+**Was:** A process-local `_in_flight` set could either cause a same-process no-op or permit simultaneous builds on different workers.
 
-**Now:** `rebuild_graph_index_task` calls `build_index_for_project(..., manage_in_flight=False)` so the workspace does not re-acquire when the task already holds the lock.
+**Now:** `rebuild_graph_index_task` acquires a Redis lease with `SET NX PX`, renews it with a unique token, and releases it using compare-and-delete Lua. The database RAG generation is checked before external writes and before publishing readiness.
 
-**Remaining:** `_in_flight` is still **process-local**. Cross-worker coordination relies on Celery task-id coalescing (`graph_rebuild:{project_id}`); it alone is not multi-process safe.
+Redis is mandatory for coordination. If it is unavailable, the task retries instead of falling back to an unsafe local lock.
 
 ---
 
@@ -731,7 +731,7 @@ In short: **global** on Microsoft ≈ “ask the theme summaries”; **global** 
 | `tests/test_rag_config.py` | Factory for microsoft/neo4j graph retrieval; strategy sets |
 | `tests/test_rag_mode_switch.py` | Mode switch / wipe behavior |
 | `tests/test_rag_mode_config.py` | Graph vs vector config defaults |
-| `tests/test_graphrag_index_fixes.py` | `_in_flight` acquire/release, rebuild scheduling, aliveness |
+| `tests/test_graphrag_index_fixes.py` | Redis lease acquire/release, generation fencing, rebuild scheduling, aliveness |
 | `tests/test_graphrag_rate_limit.py` | 429 detection, wait parsing, retry helpers |
 | `tests/test_graphrag_runner.py` | Stdlib loop / executor isolation |
 | `tests/test_graphrag_settings.py` | Settings YAML patching / embedding constraints |
@@ -742,7 +742,7 @@ In short: **global** on Microsoft ≈ “ask the theme summaries”; **global** 
 | `tests/test_project_lifecycle.py` | Project delete / wipe paths |
 | `tests/test_document_tasks_celery.py` | Ingest task wiring |
 
-Regression coverage for §10.1–§10.3 lives in `tests/test_audit_fixes.py` (pipeline preserves `graph_backend=microsoft`, wipe method name, Celery `manage_in_flight=False`).
+Regression coverage for §10.1–§10.3 lives in `tests/test_audit_fixes.py` and the major-upgrade security tests (backend preservation, wipe method, distributed lease, and generation fencing).
 
 ---
 
@@ -799,9 +799,9 @@ sequenceDiagram
   participant GR as graphrag.api
 
   API->>Celery: rebuild_graph_index_task
-  Note over Celery: acquires _in_flight
+  Note over Celery: acquires renewable Redis lease
   Celery->>WS: build_index_for_project
-  Note over WS: may skip if _in_flight already set
+  Note over WS: validates database generation fence
   WS->>MinIO: sync_from_minio
   WS->>WS: bootstrap / patch settings.yaml
   WS->>GR: build_index on stdlib loop thread
@@ -846,7 +846,7 @@ flowchart TD
 | `app/services/graphrag_runner.py` | Stdlib event-loop executor |
 | `app/services/graphrag_rate_limit.py` | 429-aware ExponentialRetry patch |
 | `app/services/graphrag_failfast.py` | Fail-fast extractor / gather patches |
-| `app/services/graph_index_tasks.py` | Debounce, `_in_flight`, reconcile |
+| `app/services/graph_index_tasks.py` | Debounce, Redis lease, generation fencing, reconcile |
 | `app/services/celery_tasks.py` | `rebuild_graph_index_task` |
 | `app/services/document_worker.py` | Post-extract graph branch |
 | `app/services/project_index_service.py` | Wipe helpers (`delete_project_subgraph`; see §10.3) |

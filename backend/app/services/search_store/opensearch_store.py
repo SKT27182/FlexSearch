@@ -108,6 +108,9 @@ class OpenSearchStore:
                     "content": {"type": "text"},
                     "project_id": {"type": "keyword"},
                     "document_id": {"type": "keyword"},
+                    "rag_generation": {"type": "integer"},
+                    "embedding_model": {"type": "keyword"},
+                    "embedding_dimension": {"type": "integer"},
                     "chunk_index": {"type": "integer"},
                     "chunk_type": {"type": "keyword"},
                     "parent_id": {"type": "keyword"},
@@ -147,11 +150,7 @@ class OpenSearchStore:
 
         # Fail fast on dimension mismatch
         mapping = client.indices.get_mapping(index=self._index)
-        props = (
-            mapping.get(self._index, {})
-            .get("mappings", {})
-            .get("properties", {})
-        )
+        props = mapping.get(self._index, {}).get("mappings", {}).get("properties", {})
         emb = props.get("embedding") or {}
         existing_dim = emb.get("dimension")
         if existing_dim is not None and int(existing_dim) != int(dim):
@@ -172,6 +171,7 @@ class OpenSearchStore:
         mapping = {
             "project_id": filters.project_id,
             "document_id": filters.document_id,
+            "rag_generation": filters.rag_generation,
             "chunk_type": filters.chunk_type,
             "parent_id": filters.parent_id,
             "cluster_id": filters.cluster_id,
@@ -205,9 +205,9 @@ class OpenSearchStore:
             }
         }
 
-    def upsert(self, documents: list[SearchDocument]) -> None:
+    def upsert(self, documents: list[SearchDocument]) -> int:
         if not documents:
-            return
+            return 0
         self.ensure_index(len(documents[0].embedding))
         actions = [
             {
@@ -227,7 +227,12 @@ class OpenSearchStore:
         if errors:
             logger.error("OpenSearch bulk upsert errors: %s", errors[:3])
             raise OpenSearchStoreError(f"Bulk upsert failed ({len(errors)} errors)")
+        if success != len(documents):
+            raise OpenSearchStoreError(
+                f"Bulk upsert acknowledged {success} of {len(documents)} documents"
+            )
         logger.info("Upserted %d documents into %s", success, self._index)
+        return success
 
     def dense_search(
         self,
@@ -348,6 +353,31 @@ class OpenSearchStore:
 
     def delete_by_project(self, project_id: str) -> None:
         self._delete_by_term("project_id", project_id)
+
+    def delete_old_project_generations(
+        self, project_id: str, keep_generation: int
+    ) -> None:
+        client = self._get_client()
+        if not client.indices.exists(index=self._index):
+            return
+        client.delete_by_query(
+            index=self._index,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [{"term": {"project_id": project_id}}],
+                        "must_not": [{"term": {"rag_generation": keep_generation}}],
+                    }
+                }
+            },
+            refresh=True,
+            conflicts="proceed",
+        )
+        logger.info(
+            "Deleted stale OpenSearch generations for project=%s keep=%s",
+            project_id,
+            keep_generation,
+        )
 
     def delete_by_ids(self, ids: list[str]) -> None:
         """Delete documents by id (used to refresh summaries without wiping chunks)."""

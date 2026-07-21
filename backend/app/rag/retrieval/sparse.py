@@ -40,11 +40,14 @@ class SparseRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         store = get_search_store()
         hits = store.bm25_search(
             query=query,
-            filters=filters_for_hierarchy(project_id, self._hierarchy_mode),
+            filters=filters_for_hierarchy(
+                project_id, self._hierarchy_mode, rag_generation=rag_generation
+            ),
             top_k=top_k,
         )
 

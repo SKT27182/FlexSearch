@@ -9,7 +9,10 @@ import pytest
 from app.rag.chunking.recursive import RecursiveChunking
 from app.rag.chat.types import build_citations
 from app.rag.factory import build_extraction_strategy, build_chunking_strategy
-from app.rag.ingestion.hierarchy import annotate_chunks_with_hierarchy, extract_heading_spans
+from app.rag.ingestion.hierarchy import (
+    annotate_chunks_with_hierarchy,
+    extract_heading_spans,
+)
 from app.rag.ingestion.preprocess import (
     normalize_whitespace,
     preprocess_extracted_text,
@@ -37,7 +40,11 @@ def test_preprocess_normalizes_whitespace() -> None:
 
 
 def test_preprocess_strips_repeated_headers() -> None:
-    pages = ["CONFIDENTIAL\nBody A\nPage 1", "CONFIDENTIAL\nBody B\nPage 2", "CONFIDENTIAL\nBody C\nPage 3"]
+    pages = [
+        "CONFIDENTIAL\nBody A\nPage 1",
+        "CONFIDENTIAL\nBody B\nPage 2",
+        "CONFIDENTIAL\nBody C\nPage 3",
+    ]
     text = "\n\n".join(pages)
     cleaned = remove_repeated_headers_footers(text, min_occurrences=3)
     assert "CONFIDENTIAL" not in cleaned
@@ -51,8 +58,14 @@ def test_preprocess_pipeline_runs() -> None:
 
 
 def test_factory_builds_docling_and_hybrid() -> None:
-    assert build_extraction_strategy(ExtractionConfig(strategy="docling")).name == "docling"
-    assert build_extraction_strategy(ExtractionConfig(strategy="hybrid_pdf")).name == "hybrid_pdf"
+    assert (
+        build_extraction_strategy(ExtractionConfig(strategy="docling")).name
+        == "docling"
+    )
+    assert (
+        build_extraction_strategy(ExtractionConfig(strategy="hybrid_pdf")).name
+        == "hybrid_pdf"
+    )
     assert build_extraction_strategy(ExtractionConfig(strategy="ocr")).name == "ocr"
 
 
@@ -84,11 +97,7 @@ def test_fixed_window_hierarchy_paths_are_per_chunk() -> None:
 
 
 def test_recursive_preserves_code_fence() -> None:
-    text = (
-        "Prose before.\n\n"
-        "```python\ndef hello():\n    return 1\n```\n\n"
-        "Prose after."
-    )
+    text = "Prose before.\n\n```python\ndef hello():\n    return 1\n```\n\nProse after."
     chunks = RecursiveChunking(chunk_size=40, overlap=0, preserve_structure=True).chunk(
         text, "doc-1"
     )

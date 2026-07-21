@@ -39,9 +39,7 @@ async def run_website_crawl_job(
     depth = max_depth if max_depth is not None else settings.crawl_max_depth
     pages = max_pages if max_pages is not None else settings.crawl_max_pages
     robots = (
-        respect_robots
-        if respect_robots is not None
-        else settings.crawl_respect_robots
+        respect_robots if respect_robots is not None else settings.crawl_respect_robots
     )
     sitemap = use_sitemap if use_sitemap is not None else settings.crawl_use_sitemap
     rate = rate_limit if rate_limit is not None else settings.crawl_rate_limit
@@ -77,11 +75,7 @@ async def run_website_crawl_job(
             if not body:
                 body = f"# {page.title}\n\nSource: {page.url}\n"
             # Prepend source header for provenance
-            markdown = (
-                f"<!-- source_url: {page.url} -->\n"
-                f"# {page.title}\n\n"
-                f"{body}\n"
-            )
+            markdown = f"<!-- source_url: {page.url} -->\n# {page.title}\n\n{body}\n"
             filename = _safe_filename(page.title, page.url)
 
             async with async_session_maker() as db:

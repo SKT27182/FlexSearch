@@ -43,12 +43,16 @@ def extract_heading_spans(text: str) -> list[HeadingSpan]:
             stack.pop()
         stack.append((level, title))
         path = [t for _, t in stack]
-        spans.append(HeadingSpan(level=level, title=title, start=start, end=end, path=path))
+        spans.append(
+            HeadingSpan(level=level, title=title, start=start, end=end, path=path)
+        )
 
     return spans
 
 
-def heading_path_at(text: str, char_offset: int, spans: list[HeadingSpan] | None = None) -> list[str]:
+def heading_path_at(
+    text: str, char_offset: int, spans: list[HeadingSpan] | None = None
+) -> list[str]:
     """Return the heading breadcrumb for a character offset."""
     spans = spans if spans is not None else extract_heading_spans(text)
     best: list[str] = []

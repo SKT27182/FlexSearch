@@ -374,30 +374,16 @@ Paths are nested under project then document so document lifecycle deletes can t
 
 ---
 
-## Schema bootstrap: `init_db` vs Alembic
+## Schema lifecycle — Alembic only
 
-### Runtime path — `init_db()` (`app/db/postgres.py`)
+Application startup performs no DDL. It compares the database revision with the exact application revision and refuses to serve traffic when they differ. Runtime database credentials therefore need data privileges, not schema-mutation privileges.
 
-Called from FastAPI lifespan on every API start:
-
-1. `ensure_database_exists()` — create target DB if missing (connects to `postgres` admin DB).
-2. `Base.metadata.create_all` — create tables from current models (includes `chat_sessions` / `chat_turns` when models are imported).
-3. Ad-hoc upgrades (idempotent SQL):
-   - `_upgrade_user_hierarchy` — `INFRA_ADMIN` enum value + `infra_hub_user_id`
-   - `_upgrade_user_name` — `users.name` NOT NULL
-   - `_upgrade_project_rag_config` — `rag_config` JSONB
-   - `_upgrade_document_processing` — progress / extract columns
-4. `DROP TABLE IF EXISTS token_usage` (legacy cleanup).
-
-**Does not** run Alembic. **Does not** have dedicated upgrade helpers for `rag_mode` / `graph_index_status` / chat tables beyond `create_all`.
-
-### Migration path — Alembic
+All schema changes are forward-only Alembic migrations. Revision `009` adds user token versions, project RAG generations and transition state, previous-generation cleanup metadata, and durable outbox events.
 
 Config: `backend/alembic.ini`. Commands (repo root):
 
 ```bash
 make db-migrate      # alembic upgrade head
-make db-stamp        # stamp head without SQL (schema already current via init_db)
 make db-revision msg="..."  # autogenerate
 ```
 

@@ -117,14 +117,29 @@ class ChatHistoryService:
         self,
         session_id: UUID,
         *,
+        user_id: UUID,
+        project_id: UUID,
         max_turns: int = 10,
     ) -> list[dict[str, Any]]:
-        """Load recent turns for Redis hydrate / rewrite context (no user filter)."""
-        session = await self.get_session(session_id, load_turns=True)
-        if not session:
+        """Load recent turns only after owner and project authorization."""
+        session = await self.get_session(session_id, user_id=user_id, load_turns=True)
+        if not session or session.project_id != project_id:
             return []
         turns = list(session.turns)[-max_turns:]
         return [{"role": t.role, "content": t.content} for t in turns]
+
+    async def authorize_session(
+        self,
+        session_id: UUID,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+    ) -> ChatSession | None:
+        """Return a session only when both caller and project own it."""
+        session = await self.get_session(session_id, user_id=user_id)
+        if session is None or session.project_id != project_id:
+            return None
+        return session
 
     async def ensure_session(
         self,

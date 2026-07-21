@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.models import RagMode
 from app.schemas.graph_index import GraphIndexState, GraphIndexStatusResponse
@@ -70,8 +70,9 @@ class RagModeSwitchRequest(BaseModel):
 
 class RagModeSwitchResponse(BaseModel):
     rag_mode: Literal["vector", "graph"]
-    message: str
-    documents_queued: int
+    generation: int
+    transition_status: Literal["switching"]
+    documents_total: int
 
 
 class ProjectResponse(BaseModel):
@@ -84,12 +85,14 @@ class ProjectResponse(BaseModel):
     rag_mode: RagMode
     rag_config: VectorRagConfig | GraphRagConfig
     graph_index_status: GraphIndexStatusResponse | None = None
+    rag_generation: int
+    rag_transition_status: str
+    rag_transition_error: str | None = None
     created_at: datetime
     updated_at: datetime
     document_count: int = 0
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProjectListResponse(BaseModel):
@@ -141,6 +144,9 @@ def project_to_response(project: Any, document_count: int = 0) -> ProjectRespons
         rag_mode=rag_mode,
         rag_config=rag_config,
         graph_index_status=_graph_index_response(project.graph_index_status),
+        rag_generation=project.rag_generation,
+        rag_transition_status=project.rag_transition_status,
+        rag_transition_error=project.rag_transition_error,
         created_at=project.created_at,
         updated_at=project.updated_at,
         document_count=document_count,

@@ -11,13 +11,36 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
+from tests._bootstrap import TEST_ROOT
+
 from app.main import app
 from app.db.models import Base
 from app.core.dependencies import get_db
+from app.core.config import settings
+from app.core.rate_limit import _memory
 
 
-# Test database URL (use SQLite for tests)
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+@pytest.fixture(scope="session")
+def test_root_path():
+    return TEST_ROOT
+
+
+@pytest.fixture(autouse=True)
+def isolate_process_state(monkeypatch):
+    """Unit tests never call shared auth/Redis state or leak rate-limit windows."""
+
+    async def no_infra_user(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.auth_login.verify_infra_hub_credentials", no_infra_user
+    )
+    original_rate_limit = settings.rate_limit_enabled
+    settings.rate_limit_enabled = False
+    _memory.clear()
+    yield
+    settings.rate_limit_enabled = original_rate_limit
+    _memory.clear()
 
 
 @pytest.fixture(scope="session")
@@ -29,10 +52,10 @@ def event_loop():
 
 
 @pytest_asyncio.fixture(scope="function")
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
+async def db_session(tmp_path) -> AsyncGenerator[AsyncSession, None]:
     """Create a test database session."""
     engine = create_async_engine(
-        TEST_DATABASE_URL,
+        f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         poolclass=NullPool,
         echo=False,
     )

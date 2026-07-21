@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.services.graphrag_workspace import graphrag_storage_prefix
 from app.services.neo4j_store import get_neo4j_store
 from app.services.search_store import get_search_store
 from app.services.storage import get_storage_service
@@ -20,7 +19,7 @@ def wipe_vector_index(project_id: UUID | str) -> None:
 
 def wipe_graph_workspace(project_id: UUID | str) -> None:
     storage = get_storage_service()
-    prefix = graphrag_storage_prefix(project_id)
+    prefix = f"projects/{project_id}/graphrag"
     storage.delete_prefix(prefix)
     logger.info("Wiped GraphRAG workspace for project %s", project_id)
 

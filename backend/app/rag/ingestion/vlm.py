@@ -17,6 +17,7 @@ from app.rag.ingestion.base import (
     ExtractedContent,
     ExtractionProgressCallback,
 )
+from app.rag.ingestion.document_limits import validate_document_limits
 from app.services.llm import get_llm_service
 from app.utils.logger import create_logger
 
@@ -25,7 +26,6 @@ logger = create_logger(__name__)
 # Keep payloads small — large base64 images slow vision APIs dramatically.
 VLM_MAX_IMAGE_SIDE = 1280
 VLM_PDF_DPI = 120
-VLM_PAGE_TIMEOUT_SEC = 180.0
 
 
 class VLMExtractionStrategy(BaseExtractionStrategy):
@@ -68,6 +68,7 @@ Return only the extracted text, formatted cleanly."""
     ) -> ExtractedContent:
         """Extract text using Vision Language Model."""
         logger.info("VLM extracting content from %s (%s)", filename, content_type)
+        validate_document_limits(content, content_type)
 
         if content_type in {"text/plain", "text/markdown"}:
             text = content.decode("utf-8", errors="replace")
@@ -87,9 +88,7 @@ Return only the extracted text, formatted cleanly."""
                 page_count=1,
             )
         if content_type == "application/pdf":
-            return await self._extract_pdf(
-                content, filename, on_progress=on_progress
-            )
+            return await self._extract_pdf(content, filename, on_progress=on_progress)
         if content_type.startswith("image/"):
             return await self._extract_image(content, filename)
         raise ValueError(f"Unsupported content type: {content_type}")
@@ -136,7 +135,7 @@ Return only the extracted text, formatted cleanly."""
             response = await llm.complete(
                 messages,
                 max_tokens=4096,
-                timeout_sec=VLM_PAGE_TIMEOUT_SEC,
+                timeout_sec=60.0,
             )
             extracted_text = response.content
         except Exception as e:

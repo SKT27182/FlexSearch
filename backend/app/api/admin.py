@@ -35,6 +35,7 @@ class AdminCreateUser(BaseModel):
     """Schema for admin creating a user."""
 
     email: EmailStr
+    name: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8)
     role: str = Field(default="USER", pattern="^(ADMIN|USER)$")
 
@@ -84,14 +85,23 @@ class AdminUserProjectsResponse(BaseModel):
 
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
     skip: int = 0,
     limit: int = 100,
 ) -> list[User]:
     """List all users (admin or infra-hub admin)."""
+    visible_roles = (
+        (UserRole.ADMIN, UserRole.USER)
+        if is_infra_admin(current_user)
+        else (UserRole.USER,)
+    )
     result = await db.execute(
-        select(User).offset(skip).limit(limit).order_by(User.created_at.desc())
+        select(User)
+        .where(User.role.in_(visible_roles))
+        .offset(skip)
+        .limit(limit)
+        .order_by(User.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -118,6 +128,7 @@ async def create_user(
 
     user = User(
         email=user_data.email,
+        name=user_data.name.strip(),
         hashed_password=get_password_hash(user_data.password),
         role=UserRole(user_data.role),
         infra_hub_user_id=None,
@@ -134,7 +145,7 @@ async def create_user(
 async def update_user(
     user_id: UUID,
     body: AdminUpdateUser,
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """Reset password for a user (admin or infra admin)."""
@@ -142,13 +153,10 @@ async def update_user(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if is_infra_admin(user):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot modify infra-hub admin accounts",
-        )
+    await _require_can_administer_user(current_user, user)
     if body.password:
         user.hashed_password = get_password_hash(body.password)
+        user.token_version += 1
         await db.commit()
         await db.refresh(user)
     return user
@@ -184,6 +192,7 @@ async def update_user_role(
         )
 
     user.role = role
+    user.token_version += 1
     await db.commit()
     await db.refresh(user)
 
@@ -207,23 +216,12 @@ async def delete_user(
             detail="User not found",
         )
 
-    if is_infra_admin(user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot delete infra-hub admin accounts from FlexSearch",
-        )
-
-    if user.role == UserRole.ADMIN and not is_infra_admin(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only infra-hub admins can delete administrator accounts",
-        )
-
     if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete yourself",
         )
+    await _require_can_administer_user(current_user, user)
 
     await db.delete(user)
     await db.commit()
@@ -234,7 +232,7 @@ async def delete_user(
 @router.get("/users/{user_id}/stats", response_model=UserStats)
 async def get_user_stats(
     user_id: UUID,
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserStats:
     """Get detailed statistics for a specific user."""
@@ -246,6 +244,7 @@ async def get_user_stats(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+    await _require_can_administer_user(current_user, user)
 
     project_count = (
         await db.execute(
@@ -274,14 +273,23 @@ async def get_user_stats(
 
 @router.get("/users/stats/all", response_model=list[UserStats])
 async def get_all_user_stats(
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
     skip: int = 0,
     limit: int = 50,
 ) -> list[UserStats]:
     """Get statistics for all users."""
+    visible_roles = (
+        (UserRole.ADMIN, UserRole.USER)
+        if is_infra_admin(current_user)
+        else (UserRole.USER,)
+    )
     result = await db.execute(
-        select(User).offset(skip).limit(limit).order_by(User.created_at.desc())
+        select(User)
+        .where(User.role.in_(visible_roles))
+        .offset(skip)
+        .limit(limit)
+        .order_by(User.created_at.desc())
     )
     users = result.scalars().all()
 
@@ -324,8 +332,8 @@ async def _require_can_administer_user(
 ) -> None:
     if not user_can_administer_target(admin, target):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot manage this user's resources",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
         )
 
 
@@ -344,7 +352,7 @@ async def list_user_projects(
 
     projects_result = await db.execute(
         select(Project)
-        .where(Project.owner_id == user_id)
+        .where(Project.owner_id == user_id, Project.deleting_at.is_(None))
         .order_by(Project.created_at.desc())
     )
     projects = projects_result.scalars().all()
@@ -399,7 +407,9 @@ async def admin_delete_project(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Delete another user's project (admin hierarchy enforced)."""
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -453,7 +463,7 @@ async def admin_delete_document(
 
 @router.get("/documents")
 async def list_all_documents(
-    _: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
     skip: int = 0,
     limit: int = 100,
@@ -469,6 +479,12 @@ async def list_all_documents(
         .join(Project, Document.project_id == Project.id)
         .join(User, Project.owner_id == User.id)
     )
+    visible_roles = (
+        (UserRole.ADMIN, UserRole.USER)
+        if is_infra_admin(current_user)
+        else (UserRole.USER,)
+    )
+    query = query.where(User.role.in_(visible_roles))
 
     if status_filter:
         try:
@@ -502,7 +518,7 @@ async def list_all_documents(
 
 @router.get("/stats")
 async def get_system_stats(
-    _: Annotated[User, Depends(require_admin)],
+    _: Annotated[User, Depends(require_infra_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Get system statistics (admin only)."""

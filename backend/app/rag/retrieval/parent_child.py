@@ -37,6 +37,7 @@ class ParentChildRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         """
         Search child chunks, resolve parents via get_by_ids, score by best child.
@@ -49,6 +50,7 @@ class ParentChildRetrieval(BaseRetrievalStrategy):
             query_vector=query_vector,
             filters=SearchFilters(
                 project_id=project_id,
+                rag_generation=rag_generation,
                 chunk_type="child",
                 summary_level="chunk",
             ),
@@ -67,9 +69,7 @@ class ParentChildRetrieval(BaseRetrievalStrategy):
                 best_child[parent_id] = (hit.score, hit.id)
 
         if not best_child:
-            logger.debug(
-                "No child hits with parent_id for project %s", project_id
-            )
+            logger.debug("No child hits with parent_id for project %s", project_id)
             return []
 
         # Prefer parents ordered by best child score

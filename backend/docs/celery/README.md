@@ -251,7 +251,7 @@ Four queues isolate different kinds of work. By default one worker consumes all 
 | Task | Body | Notes |
 |---|---|---|
 | `process_document_task` | `document_worker.process_document` | Vector extract→chunk→OpenSearch, or graph extract / Neo4j index. On uncaught crash, best-effort `FAILED` if not already `COMPLETED`. |
-| `rebuild_graph_index_task` | `graphrag_workspace.build_index_for_project(..., is_update=True)` | Microsoft GraphRAG project rebuild. Process-local `_in_flight` + Celery task-id coalesce. |
+| `rebuild_graph_index_task` | Generation-fenced `graphrag_workspace.build_index_for_project(..., is_update=True)` | Microsoft GraphRAG project rebuild protected by a renewable Redis lease. |
 | `build_document_summaries_task` | `summary_worker.run_document_summary_job` | Hierarchical summaries for **vector** docs only; skips graph / MS GraphRAG / disabled config. |
 | `website_crawl_task` | `crawl_worker.run_website_crawl_job` | BFS pages → `create_and_enqueue_document` → ingest queue. |
 | `bulk_import_task` | Download MinIO `.ragpack` → `bulk_worker.run_bulk_import_job` | Same shared ingest path per document. |
@@ -369,11 +369,11 @@ Delete ordering: `cancel_document_ingest` + `cancel_document_summary` **before**
 ### Graph rebuild (`graph` queue)
 
 - Debounced with Celery `countdown` (default 5s).
-- Two layers of “don’t double-build”:
-  1. Idempotent Celery task id + `prepare_reusable_task_id(..., replace_queued=True)`
-  2. Process-local `_in_flight: set[str]` acquired in the Celery task; workspace called with `manage_in_flight=False` (avoids same-process no-op skip)
-- **Remaining gap:** `_in_flight` is **not** shared across worker processes. Multi-worker safety relies on task-id coalesce; replace-queued fresh ids can still overlap under race.
-- Stale recovery (no Beat):
+- Coordination and fencing:
+  1. A Redis `SET NX PX` lease serializes builds across processes and hosts.
+  2. Lease renewal uses a unique task token; compare-and-delete prevents releasing another worker's lease.
+  3. The PostgreSQL RAG generation fences every write and publication step.
+- Stale recovery (dedicated Beat scheduler):
   - API startup: `reconcile_interrupted_graph_indexes()`
   - Status path: `reconcile_stale_graph_index()` (~70 minutes / dead-task inspect)
 
@@ -426,7 +426,7 @@ Service `worker` (`Dockerfile.worker`):
 - Env: `CELERY_QUEUES=ingest,graph,summary,default`, `CELERY_CONCURRENCY=2`
 - CMD: `celery -A app.celery_app worker --loglevel=INFO -Q ${CELERY_QUEUES} --concurrency=${CELERY_CONCURRENCY}`
 - Same Redis/OpenSearch env as backend; `depends_on: backend` healthy
-- **Single combined worker** — no Beat container, no per-queue split by default
+- **Single combined worker** plus a dedicated Beat scheduler that dispatches the transactional outbox; production may split queue consumers
 
 ### Local
 
@@ -462,7 +462,7 @@ celery -A app.celery_app worker -Q default --concurrency=1
 | Docs stuck at `stored` / PENDING | Worker down or wrong `-Q` | Start worker; confirm all four queues |
 | Broker connection refused | Redis host/port/password (63791 vs 6379) | Align `.env` with infra-hub |
 | `Discarding revoked task` | Revoke then reuse same task id | Use `celery_schedule` helpers only |
-| Duplicate MS GraphRAG builds | Multi-worker + `_in_flight` process-local | Prefer one graph consumer; rely on task-id coalesce |
+| Graph lease contention | Another process owns the Redis lease | Wait for the active build; inspect lease renewal and generation logs |
 | Graph status stuck `indexing` | Worker crash / API restart | Startup reconcile or status reconcile; click Rebuild |
 | Summary “done” but error text | Summary task failed after chunks indexed | Re-run summary / reindex; chunks still searchable |
 | Neo4j wipe on mode switch | `wipe_neo4j_graph` → `delete_project_subgraph` | Fixed; verify Neo4j after destructive mode switches |
@@ -577,14 +577,14 @@ stateDiagram-v2
 |---|---|
 | `app/celery_app.py` | App, routes, serializers |
 | `app/services/celery_tasks.py` | Five task entrypoints + `_run_async` |
-| `app/services/celery_schedule.py` | Coalesce / replace task ids (**not** Beat) |
+| `app/services/outbox.py` | Transactional event creation, dispatch, retry, and reconciliation |
 | `app/services/document_tasks.py` | Schedule / cancel ingest |
 | `app/services/document_worker.py` | Ingest state machine |
 | `app/services/document_status.py` | DB update + publish |
 | `app/services/document_events.py` | Document Redis channels |
 | `app/services/document_storage.py` | MinIO key helpers |
 | `app/services/summary_tasks.py` / `summary_worker.py` | Summary enqueue + job |
-| `app/services/graph_index_tasks.py` | Graph rebuild schedule + reconcile + `_in_flight` |
+| `app/services/graph_index_tasks.py` | Graph rebuild schedule, Redis lease, generation fence, and reconcile |
 | `app/services/job_events.py` | Job meta / SSE |
 | `app/services/website/crawl_*.py` | Crawl schedule + worker |
 | `app/services/bulk/bulk_*.py` | Bulk schedule + worker |

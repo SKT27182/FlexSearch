@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+import asyncio
 from io import BytesIO
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -13,12 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.documents import verify_project_access
 from app.core.dependencies import get_current_active_user, get_db
+from app.core.config import settings
 from app.core.rate_limit import BULK_RULE, check_rate_limit
 from app.db.models import User
-from app.services.bulk.bulk_tasks import schedule_bulk_import
 from app.services.bulk.bulk_worker import export_project_ragpack
 from app.services.bulk.schemas import BulkImportSubmitResponse
 from app.services.storage import get_storage_service
+from app.services.upload_validation import spool_upload
+from app.services.job_events import register_job_meta
+from app.services.outbox import add_outbox_event
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -55,20 +59,57 @@ async def submit_bulk_import(
             status_code=400,
             detail="Expected .ragpack, .ragpack.zip, or .zip",
         )
-    content = await file.read()
-    if not content:
+    upload_stream, file_size, _ = await spool_upload(
+        file, max_bytes=settings.ragpack_upload_max_bytes
+    )
+    if not file_size:
+        upload_stream.close()
         raise HTTPException(status_code=400, detail="Empty file")
 
     storage = get_storage_service()
-    storage_path = f"{project_id}/imports/{file.filename}"
-    storage.upload_file(
-        path=storage_path,
-        data=content,
-        content_type="application/zip",
+    event_id = uuid4()
+    storage_path = f"{project_id}/imports/{event_id}/{file.filename}"
+    temporary_path = f"tmp/imports/{event_id}"
+    try:
+        await asyncio.to_thread(
+            storage.upload_stream,
+            temporary_path,
+            upload_stream,
+            file_size,
+            "application/zip",
+        )
+    except Exception:
+        try:
+            await asyncio.to_thread(storage.delete_file, temporary_path)
+        except Exception:
+            logger.warning("Could not remove failed bulk upload %s", temporary_path)
+        raise
+    finally:
+        upload_stream.close()
+    job_id = f"bulk:{event_id.hex}"
+    add_outbox_event(
+        db,
+        event_type="bulk_import",
+        aggregate_type="job",
+        aggregate_id=event_id,
+        project_id=project_id,
+        payload={
+            "job_id": job_id,
+            "temporary_path": temporary_path,
+            "storage_path": storage_path,
+            "owner_user_id": str(current_user.id),
+        },
     )
-    job_id = schedule_bulk_import(
-        storage_path=storage_path,
-        target_project_id=project_id,
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await asyncio.to_thread(storage.delete_file, temporary_path)
+        raise
+    await register_job_meta(
+        job_id,
+        project_id=project_id,
+        job_type="bulk",
         owner_user_id=current_user.id,
     )
     return BulkImportSubmitResponse(

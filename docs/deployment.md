@@ -1,242 +1,82 @@
-# Deployment Guide
+# FlexSearch 1.0 major-upgrade deployment
 
-## Option 1: Docker Compose (Recommended)
+This release is a coordinated, breaking cutover. The API, worker, Celery Beat
+scheduler, frontend, database revision, and runtime configuration must be
+deployed together. Never run the previous application against the upgraded
+schema.
 
-### Production Docker Compose
+## Required runtime contract
 
-```yaml
-# docker-compose.prod.yml
-version: "3.8"
+`backend/.env.example` is the canonical variable catalog. In particular, use
+`POSTGRES_URL`, `JWT_SECRET`, and `API_KEY`; the obsolete `DATABASE_URL`,
+`JWT_SECRET_KEY`, and `LLM_API_KEY` names are not accepted.
 
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: flexsearch
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: flexsearch
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
+Production requires `APP_ENV=production`, an HTTPS `APP_PUBLIC_URL`, a strong
+new `JWT_SECRET`, a strong `OPERATIONS_TOKEN`, verified TLS for OpenSearch,
+non-default datastore credentials, and explicit CORS origins. Startup rejects
+an insecure configuration. Credentials must be injected at runtime and must
+not be baked into images.
 
-  opensearch:
-    image: opensearchproject/opensearch:2
-    environment:
-      - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true
-      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-    ports:
-      - "9200:9200"
-    restart: unless-stopped
+The supported direct-upload formats are PDF, plain text, Markdown, HTML, PNG,
+and JPEG. DOCX, PPT/PPTX, CSV, XLS, and XLSX are not supported in this release.
+The backend enforces upload, remote response, archive, page, and decoded-image
+limits listed in `.env.example`.
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    ports:
-      - "63791:6379"
-    restart: unless-stopped
+## Cutover runbook
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
-    volumes:
-      - minio_data:/data
-    restart: unless-stopped
+1. Announce maintenance and stop uploads, crawls, chat, graph rebuilds, API
+   instances, workers, and schedulers.
+2. Back up PostgreSQL, MinIO, Neo4j, OpenSearch indexes, and Microsoft GraphRAG
+   workspaces. Test restoration before proceeding.
+3. Run a preflight inventory for invalid RAG configurations, missing/orphaned
+   objects, incomplete documents, and embedding model/dimension drift.
+4. Supply `POSTGRES_ADMIN_URL` only to the migration environment and run
+   `make db-bootstrap`. It creates the application database when absent,
+   applies `alembic upgrade head`, and verifies revision `009`. The migration
+   identity needs `CREATE DATABASE` and schema DDL privileges. Remove
+   `POSTGRES_ADMIN_URL` before starting API or worker runtimes. Migration `009`
+   is forward-only.
+5. Rotate `JWT_SECRET`. This intentionally signs every user out.
+6. Deploy the API, worker, scheduler, and frontend from the same release.
+   Runtime database credentials should not have CREATE/ALTER/DROP privileges.
+7. Reconcile document/object state and reindex invalid Neo4j anchors and every
+   index whose embedding model or vector dimension changed.
+8. Run authorization, upload, retrieval, chat, streaming, observability, and
+   migration smoke tests.
+9. Enable read traffic, then chat, then ingestion, then background reindexing.
+10. Monitor outbox backlog/failures, worker memory, rejected uploads, graph
+    lease contention, stale-generation exits, invalid citations, and cleanup.
 
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://flexsearch:${DB_PASSWORD}@postgres:5432/flexsearch
-      - OPENSEARCH_URL=http://opensearch:9200
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
-    depends_on:
-      - postgres
-      - opensearch
-      - redis
-      - minio
-    restart: unless-stopped
+Application rollback requires restoring the complete pre-upgrade data snapshot
+and the old deployment together.
 
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.worker
-    environment:
-      - OPENSEARCH_URL=http://opensearch:9200
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    depends_on:
-      - backend
-      - opensearch
-      - redis
-    restart: unless-stopped
+## Process topology
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    environment:
-      - VITE_API_URL=/api
-    restart: unless-stopped
+The provided `docker-compose.yml` starts:
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/etc/nginx/certs:ro
-    depends_on:
-      - backend
-      - frontend
-    restart: unless-stopped
+- `backend`: FastAPI, with `/health/live` as process liveness.
+- `worker`: Celery queues `ingest,graph,summary,default`.
+- `scheduler`: Celery Beat, required to dispatch transactional outbox events.
+- `frontend`: the static React build with a restrictive Content Security Policy.
 
-volumes:
-  postgres_data:
-  minio_data:
-```
+Apply migrations before starting these processes. API startup verifies that
+PostgreSQL is exactly at Alembic revision `009` and performs no
+DDL.
 
-### Backend Dockerfile
+## Observability
 
-```dockerfile
-# backend/Dockerfile
-FROM python:3.11-slim
+`GET /health/live` is public and contains process status only. Send
+`Authorization: Bearer $OPERATIONS_TOKEN` to `/health/ready` and `/metrics`.
+Neither health response includes exception strings, credentials, usage data,
+or internal topology. Detailed failures remain in protected logs.
 
-WORKDIR /app
+## Authentication and interface changes
 
-# Install uv
-RUN pip install uv
+Authentication uses a 15-minute access token held only in browser memory. A
+reload, closed tab, new tab, password change, role change, disablement, or
+administrative reset requires login. There is no refresh-token API.
 
-# Copy requirements
-COPY pyproject.toml .
-COPY uv.lock .
-
-# Install dependencies
-RUN uv sync --frozen
-
-# Copy app
-COPY app ./app
-
-# Run
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Frontend Dockerfile
-
-```dockerfile
-# frontend/Dockerfile
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-
-# Install pnpm
-RUN npm install -g pnpm
-
-# Install dependencies
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-
-# Build
-COPY . .
-RUN pnpm run build
-
-# Serve
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-```
-
-### Nginx Configuration
-
-```nginx
-# nginx.conf
-server {
-    listen 80;
-    server_name _;
-
-    # Frontend
-    location / {
-        proxy_pass http://frontend:80;
-    }
-
-    # Backend API
-    location /api {
-        proxy_pass http://backend:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-```
-
-### Deploy
-
-```bash
-# Set environment variables
-export DB_PASSWORD=your_secure_password
-export MINIO_ACCESS_KEY=your_access_key
-export MINIO_SECRET_KEY=your_secret_key
-
-# Build and start
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
----
-
-## Option 2: Manual Deployment
-
-### Backend
-
-```bash
-cd backend
-
-# Create virtual environment
-uv venv && source .venv/bin/activate
-uv pip install -e .
-
-# Set environment
-export DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/flexsearch
-
-# Run with Gunicorn
-pip install gunicorn
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
-```
-
-### Frontend
-
-```bash
-cd frontend
-
-pnpm install
-pnpm run build
-
-# Serve dist/ with nginx or any static file server
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL async connection string |
-| `JWT_SECRET_KEY` | Yes | Secret for JWT signing |
-| `OPENSEARCH_URL` | Yes | OpenSearch HTTP URL |
-| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Yes | Redis for SSE + Celery |
-| `MINIO_ENDPOINT` | Yes | MinIO server endpoint |
-| `MINIO_ACCESS_KEY` | Yes | MinIO access key |
-| `MINIO_SECRET_KEY` | Yes | MinIO secret key |
-| `LLM_API_KEY` | Conditional | API key used only when `EXTRACTION_STRATEGY=vlm` |
-| `LLM_MODEL` | Conditional | Vision-capable model used only for VLM extraction |
+RAG mode changes return HTTP 202 with a new generation and transition status.
+Retrieval is served only from the published generation. `/health` has been
+removed. Invalid chunk settings return 422, excessive content returns 413, and
+unauthorized chat session identifiers return 404.

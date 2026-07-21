@@ -39,7 +39,13 @@ def backend_log_path() -> Path:
     if explicit:
         return Path(explicit).expanduser()
     return (
-        Path.home() / ".local" / "share" / "projects" / "flexsearch" / "dev-logs" / "backend.log"
+        Path.home()
+        / ".local"
+        / "share"
+        / "projects"
+        / "flexsearch"
+        / "dev-logs"
+        / "backend.log"
     )
 
 

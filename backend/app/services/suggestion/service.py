@@ -161,10 +161,13 @@ async def generate_project_suggestions(
         max_tokens=512,
     )
     questions = _parse_questions(response.content, limit=count)
-    return questions or [
-        "What are the main themes in these documents?",
-        "Summarize the most important findings.",
-    ][:count]
+    return (
+        questions
+        or [
+            "What are the main themes in these documents?",
+            "Summarize the most important findings.",
+        ][:count]
+    )
 
 
 async def generate_followup_questions(

@@ -8,6 +8,7 @@ from io import BytesIO
 from typing import BinaryIO
 
 from minio import Minio
+from minio.commonconfig import CopySource
 from minio.error import S3Error
 
 from app.core.config import settings
@@ -121,6 +122,17 @@ class StorageService:
             logger.error(f"Failed to delete file: {e}")
             raise
 
+    def promote_file(self, temporary_path: str, final_path: str) -> None:
+        """Atomically publish a temporary object and remove the temporary key."""
+        if self.file_exists(final_path) and not self.file_exists(temporary_path):
+            return
+        self._client.copy_object(
+            self._bucket,
+            final_path,
+            CopySource(self._bucket, temporary_path),
+        )
+        self._client.remove_object(self._bucket, temporary_path)
+
     def delete_prefix(self, prefix: str) -> int:
         """Delete all objects under a prefix. Returns count deleted."""
         deleted = 0
@@ -191,7 +203,9 @@ class StorageService:
     def list_files(self, prefix: str = "") -> list[str]:
         """List files with given prefix."""
         try:
-            objects = self._client.list_objects(self._bucket, prefix=prefix)
+            objects = self._client.list_objects(
+                self._bucket, prefix=prefix, recursive=True
+            )
             return [obj.object_name for obj in objects]
         except S3Error as e:
             logger.error(f"Failed to list files: {e}")

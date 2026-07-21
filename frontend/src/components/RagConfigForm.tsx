@@ -17,8 +17,6 @@ import {
   defaultConfigForProjectMode,
   defaultSummariesConfig,
   isGraphRagConfig,
-  projectModeToRagMode,
-  type ProjectMode,
 } from '@/lib/rag-types';
 import { Input } from '@/components/ui';
 
@@ -650,28 +648,3 @@ export function RagConfigForm({
     </div>
   );
 }
-
-export function defaultRagConfigForMode(
-  mode: RagMode,
-  graphBackend: GraphBackend = 'neo4j'
-): RagConfig {
-  if (mode === 'graph') {
-    const projectMode: ProjectMode =
-      graphBackend === 'microsoft' ? 'graph_microsoft' : 'graph_neo4j';
-    return defaultConfigForProjectMode(projectMode);
-  }
-  return defaultConfigForProjectMode('vector');
-}
-
-export function projectModeFromRag(
-  ragMode: RagMode,
-  config: RagConfig
-): ProjectMode {
-  if (ragMode === 'vector') return 'vector';
-  if (isGraphRagConfig(config) && config.graph_backend === 'microsoft') {
-    return 'graph_microsoft';
-  }
-  return 'graph_neo4j';
-}
-
-export { projectModeToRagMode };

@@ -7,7 +7,7 @@ Authentication endpoints: register, login, me, profile.
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from app.core.security import (
     get_password_hash,
     verify_password,
 )
+from app.core.rate_limit import LOGIN_RULE, REGISTER_RULE, check_rate_limit
 from app.db.models import User, UserRole
 from app.schemas.auth import (
     PasswordChange,
@@ -39,9 +40,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 )
 async def register(
     user_data: UserRegister,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """Register a FlexSearch-local user (always USER role)."""
+    await check_rate_limit(request, REGISTER_RULE)
     result = await db.execute(select(User).where(User.email == user_data.email))
     existing_user = result.scalar_one_or_none()
 
@@ -71,6 +74,7 @@ async def register(
 @router.post("/login", response_model=Token)
 async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Token:
     """
@@ -78,6 +82,10 @@ async def login(
 
     Infra-hub main_db users authenticate first and receive INFRA_ADMIN.
     """
+    await check_rate_limit(request, LOGIN_RULE)
+    await check_rate_limit(
+        request, LOGIN_RULE, user_id=f"account:{form_data.username.strip().lower()}"
+    )
     user = await authenticate_user(db, form_data.username, form_data.password)
     if user is None:
         logger.debug("Login failed for %s", form_data.username)
@@ -88,7 +96,7 @@ async def login(
         )
 
     access_token = create_access_token(
-        data={"sub": str(user.id), "role": user.role.value}
+        data={"sub": str(user.id), "role": user.role.value, "ver": user.token_version}
     )
 
     logger.info(f"User logged in: {user.email} ({user.role.value})")
@@ -142,6 +150,7 @@ async def change_password(
             detail="Current password is incorrect",
         )
     current_user.hashed_password = get_password_hash(body.new_password)
+    current_user.token_version += 1
     current_user.updated_at = datetime.now(timezone.utc)
     await db.commit()
     logger.info("Password changed for user %s", current_user.email)

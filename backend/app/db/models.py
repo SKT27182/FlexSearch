@@ -9,14 +9,26 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, TypeDecorator, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    TypeDecorator,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.postgres import Base
 
 if TYPE_CHECKING:
     pass
+
+PROJECT_JSON = JSON().with_variant(JSONB(), "postgresql")
 
 
 class UserRole(str, enum.Enum):
@@ -32,7 +44,6 @@ class RagMode(str, enum.Enum):
 
     VECTOR = "vector"
     GRAPH = "graph"
-
 
 
 class StrEnumType(TypeDecorator):
@@ -74,12 +85,21 @@ class DocumentStatus(str, enum.Enum):
     """Document processing status pipeline."""
 
     UPLOADED = "uploaded"
+    PENDING_STORAGE = "pending_storage"
     STORED = "stored"
     EXTRACTING = "extracting"
     EXTRACTED = "extracted"
     CHUNKING = "chunking"
     INDEXING = "indexing"
     GRAPH_INDEXING = "graph_indexing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    DELETING = "deleting"
+
+
+class OutboxState(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -115,6 +135,7 @@ class User(Base):
         unique=True,
         index=True,
     )
+    token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -159,7 +180,7 @@ class Project(Base):
         index=True,
     )
     rag_config: Mapped[dict[str, Any]] = mapped_column(
-        JSON,
+        PROJECT_JSON,
         nullable=False,
         default=dict,
     )
@@ -169,8 +190,22 @@ class Project(Base):
         nullable=False,
     )
     graph_index_status: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        PROJECT_JSON,
         nullable=True,
+    )
+    rag_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    rag_transition_status: Mapped[str] = mapped_column(
+        String(32), default="ready", nullable=False
+    )
+    rag_transition_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rag_transition_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rag_previous_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rag_previous_backend: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rag_previous_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deleting_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -328,7 +363,9 @@ class Document(Base):
     processing_step: Mapped[str | None] = mapped_column(String(255), nullable=True)
     progress_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     extracted_text_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    extraction_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extraction_config_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     extracted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -355,4 +392,39 @@ class Document(Base):
     project: Mapped["Project"] = relationship(
         "Project",
         back_populates="documents",
+    )
+
+
+class OutboxEvent(Base):
+    """Durable hand-off between database state and external side effects."""
+
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    aggregate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    state: Mapped[OutboxState] = mapped_column(
+        StrEnumType(OutboxState, length=16),
+        default=OutboxState.PENDING,
+        nullable=False,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

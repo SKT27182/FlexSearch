@@ -35,12 +35,11 @@ def test_celery_broker_defaults_to_redis() -> None:
     assert s.celery_result_backend == s.redis_url
 
 
-def test_celery_routes_five_tasks_across_four_queues() -> None:
+def test_celery_routes_six_tasks_across_four_queues() -> None:
     from app.celery_app import celery_app
 
     routes = celery_app.conf.task_routes
-    assert len(routes) == 5
+    assert len(routes) == 6
     queues = {entry["queue"] for entry in routes.values()}
     assert queues == {"ingest", "graph", "summary", "default"}
-    # No Celery Beat schedule — debounce is in-process / countdown-based.
-    assert not celery_app.conf.beat_schedule
+    assert celery_app.conf.beat_schedule["dispatch-outbox"]["schedule"] == 5.0

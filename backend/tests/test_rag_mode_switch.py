@@ -1,10 +1,14 @@
 """Tests for destructive rag_mode switch."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import OutboxEvent, Project
 
 
 async def _login(client: AsyncClient, email: str) -> str:
@@ -54,10 +58,12 @@ async def test_switch_vector_to_graph(
         json={"rag_mode": "graph"},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     payload = response.json()
     assert payload["rag_mode"] == "graph"
-    vector_store.delete_by_project.assert_called_once_with(project_id)
+    vector_store.delete_by_project.assert_not_called()
+    assert payload["generation"] == 2
+    assert payload["transition_status"] == "switching"
 
     get_resp = await async_client.get(
         f"/api/projects/{project_id}",
@@ -65,3 +71,21 @@ async def test_switch_vector_to_graph(
     )
     assert get_resp.json()["rag_mode"] == "graph"
     assert get_resp.json()["graph_index_status"]["status"] == "pending"
+
+    project = (
+        await db_session.execute(
+            select(Project).where(Project.id == UUID(project_id))
+        )
+    ).scalar_one()
+    assert project.rag_previous_mode == "vector"
+    assert project.rag_previous_generation == 1
+    events = list(
+        (
+            await db_session.execute(
+                select(OutboxEvent).where(OutboxEvent.project_id == project.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [event.event_type for event in events] == ["rag_mode_rebuild"]

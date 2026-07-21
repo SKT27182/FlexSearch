@@ -7,7 +7,7 @@ import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardConten
 import { cn } from '@/lib/utils'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { AccentPicker } from '@/components/AccentPicker'
-import { useTheme } from '@/components/theme-provider'
+import { useTheme } from '@/hooks/useTheme'
 
 export function SettingsPage() {
   const { user, logout, loadUser } = useAuthStore()

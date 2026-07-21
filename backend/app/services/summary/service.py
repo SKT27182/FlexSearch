@@ -31,8 +31,10 @@ class SummaryJobResult:
     reason: str | None = None
 
 
-def _stable_summary_id(document_id: str, level: str, key: str) -> str:
-    return str(uuid5(NAMESPACE_DNS, f"summary:{document_id}:{level}:{key}"))
+def _stable_summary_id(document_id: str, generation: int, level: str, key: str) -> str:
+    return str(
+        uuid5(NAMESPACE_DNS, f"summary:{document_id}:{generation}:{level}:{key}")
+    )
 
 
 def _auto_n_clusters(n_chunks: int, configured: int | None) -> int:
@@ -58,13 +60,17 @@ def _scroll_all(filters: SearchFilters, *, page_size: int = 500) -> list[SearchH
     return all_hits
 
 
-def _delete_existing_summaries(document_id: str) -> None:
+def _delete_existing_summaries(document_id: str, generation: int) -> None:
     """Remove prior cluster/document summaries for this document (keep chunks)."""
     store = get_search_store()
     ids: list[str] = []
     for level in ("cluster", "document"):
         hits = _scroll_all(
-            SearchFilters(document_id=document_id, summary_level=level)  # type: ignore[arg-type]
+            SearchFilters(
+                document_id=document_id,
+                rag_generation=generation,
+                summary_level=level,  # type: ignore[arg-type]
+            )
         )
         ids.extend(h.id for h in hits)
     if ids:
@@ -75,6 +81,7 @@ async def build_document_summaries(
     *,
     project_id: str,
     document_id: str,
+    generation: int,
     filename: str,
     config: HierarchicalSummaryConfig,
 ) -> SummaryJobResult:
@@ -99,16 +106,13 @@ async def build_document_summaries(
         SearchFilters(
             project_id=project_id,
             document_id=document_id,
+            rag_generation=generation,
             summary_level="chunk",
         ),
         page_size=1000,
     )
     # Prefer non-parent chunks for clustering when parent_child is used
-    chunk_hits = [
-        h
-        for h in chunks
-        if h.chunk_type != "parent"
-    ] or list(chunks)
+    chunk_hits = [h for h in chunks if h.chunk_type != "parent"] or list(chunks)
 
     if len(chunk_hits) < config.min_chunks:
         return SummaryJobResult(
@@ -142,7 +146,7 @@ async def build_document_summaries(
     km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
     labels = km.fit_predict(X)
 
-    _delete_existing_summaries(document_id)
+    _delete_existing_summaries(document_id, generation)
 
     llm = get_llm_service()
     cluster_docs: list[SearchDocument] = []
@@ -184,7 +188,7 @@ async def build_document_summaries(
         member_vecs = X[[i for i, lab in enumerate(labels) if int(lab) == cluster_idx]]
         centroid = member_vecs.mean(axis=0).tolist()
         cluster_id = f"c{cluster_idx}"
-        doc_id = _stable_summary_id(document_id, "cluster", cluster_id)
+        doc_id = _stable_summary_id(document_id, generation, "cluster", cluster_id)
         cluster_docs.append(
             SearchDocument(
                 id=doc_id,
@@ -192,6 +196,9 @@ async def build_document_summaries(
                 content=summary_text,
                 project_id=project_id,
                 document_id=document_id,
+                rag_generation=generation,
+                embedding_model=embedding.model_name,
+                embedding_dimension=len(centroid),
                 chunk_index=cluster_idx,
                 summary_level="cluster",
                 cluster_id=cluster_id,
@@ -227,7 +234,9 @@ async def build_document_summaries(
             manifesto_text = "\n".join(cluster_summaries[:5])
 
         manifesto_emb = embedding.embed(manifesto_text)
-        manifesto_id = _stable_summary_id(document_id, "document", "manifesto")
+        manifesto_id = _stable_summary_id(
+            document_id, generation, "document", "manifesto"
+        )
         all_member_ids = [h.id for h in chunk_hits]
         cluster_docs.append(
             SearchDocument(
@@ -236,6 +245,9 @@ async def build_document_summaries(
                 content=manifesto_text,
                 project_id=project_id,
                 document_id=document_id,
+                rag_generation=generation,
+                embedding_model=embedding.model_name,
+                embedding_dimension=len(manifesto_emb),
                 chunk_index=0,
                 summary_level="document",
                 cluster_id="manifesto",

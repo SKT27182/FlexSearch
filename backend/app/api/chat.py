@@ -30,10 +30,9 @@ from app.schemas.chat import (
     ChatTurnResponse,
 )
 from app.schemas.graph_index import GraphIndexState
-from app.schemas.project import graph_backend_for_project
 from app.schemas.rag_config import parse_rag_config
 from app.services.chat_history import ChatHistoryService
-from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
+from app.services.neo4j_store import Neo4jStoreError
 from app.services.project_access import user_can_access_project
 from app.services.retrieval_validation import validate_retrieval_for_mode
 from app.services.session_memory import SessionMemoryService
@@ -63,7 +62,9 @@ async def _load_accessible_project(
             detail="Invalid project ID format",
         ) from exc
 
-    result = await db.execute(select(Project).where(Project.id == project_uuid))
+    result = await db.execute(
+        select(Project).where(Project.id == project_uuid, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -73,31 +74,18 @@ async def _load_accessible_project(
 
 
 def _ensure_graph_ready(project: Project) -> None:
+    if project.rag_transition_status == "switching":
+        raise HTTPException(status_code=409, detail="RAG generation is switching")
     rag_mode = project.rag_mode
     if isinstance(rag_mode, str):
         rag_mode = RagMode(rag_mode)
     if rag_mode != RagMode.GRAPH:
         return
-    backend = graph_backend_for_project(rag_mode, project.rag_config)
-    if backend == "microsoft":
-        graph_state = GraphIndexState.from_db(project.graph_index_status)
-        if graph_state.status != "ready":
-            raise HTTPException(
-                status_code=409,
-                detail="Graph index is not ready. Wait for indexing to complete.",
-            )
-        return
-    try:
-        stats = get_neo4j_store().get_stats(str(project.id))
-    except Neo4jStoreError as exc:
+    graph_state = GraphIndexState.from_db(project.graph_index_status)
+    if graph_state.status != "ready":
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    if stats.passage_count == 0 and stats.entity_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Graph index not ready — upload and process documents first",
+            status_code=409,
+            detail="Graph index is not ready. Wait for indexing to complete.",
         )
 
 
@@ -138,9 +126,7 @@ async def chat_query(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ChatQueryResponse:
     """Non-streaming RAG chat: retrieve + LLM answer + citations."""
-    await check_rate_limit(
-        http_request, CHAT_RULE, user_id=str(current_user.id)
-    )
+    await check_rate_limit(http_request, CHAT_RULE, user_id=str(current_user.id))
     project = await _load_accessible_project(db, request.project_id, current_user)
     rag_mode = project.rag_mode
     if isinstance(rag_mode, str):
@@ -160,6 +146,15 @@ async def chat_query(
             session_uuid = UUID(request.session_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid session ID") from exc
+        if (
+            await history.authorize_session(
+                session_uuid,
+                user_id=current_user.id,
+                project_id=project.id,
+            )
+            is None
+        ):
+            raise HTTPException(status_code=404, detail="Chat session not found")
 
     session = None
     if request.persist:
@@ -176,6 +171,8 @@ async def chat_query(
         result = await orchestrator.answer(
             request.query,
             session_id=session_uuid,
+            session_user_id=current_user.id if session_uuid else None,
+            session_project_id=project.id if session_uuid else None,
             top_k=request.top_k,
             overrides=request.overrides,
         )
@@ -222,6 +219,8 @@ async def chat_query(
         output_tokens=result.output_tokens,
         latency_ms=result.latency_ms,
         empty_retrieval=result.empty_retrieval,
+        grounded=result.grounded,
+        invalid_citations=result.invalid_citations,
         debug=result.debug,
     )
 
@@ -234,9 +233,7 @@ async def chat_stream(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     """SSE streaming RAG chat."""
-    await check_rate_limit(
-        http_request, CHAT_RULE, user_id=str(current_user.id)
-    )
+    await check_rate_limit(http_request, CHAT_RULE, user_id=str(current_user.id))
     project = await _load_accessible_project(db, request.project_id, current_user)
     rag_mode = project.rag_mode
     if isinstance(rag_mode, str):
@@ -256,6 +253,15 @@ async def chat_stream(
             session_uuid = UUID(request.session_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid session ID") from exc
+        if (
+            await history.authorize_session(
+                session_uuid,
+                user_id=current_user.id,
+                project_id=project.id,
+            )
+            is None
+        ):
+            raise HTTPException(status_code=404, detail="Chat session not found")
 
     session = None
     if request.persist:
@@ -279,9 +285,13 @@ async def chat_stream(
             async for event, payload in orchestrator.stream(
                 request.query,
                 session_id=session_uuid,
+                session_user_id=current_user.id if session_uuid else None,
+                session_project_id=project.id if session_uuid else None,
                 top_k=request.top_k,
                 overrides=request.overrides,
             ):
+                if await http_request.is_disconnected():
+                    return
                 if event == "citations":
                     final_citations = list(payload.get("citations") or [])
                 if event == "done":
@@ -317,13 +327,15 @@ async def chat_stream(
                     },
                 )
             yield format_sse("close", {"reason": "complete"})
-        except Neo4jStoreError as exc:
-            yield format_sse("error", {"detail": str(exc)})
-        except TimeoutError as exc:
-            yield format_sse("error", {"detail": str(exc)})
-        except Exception as exc:
+        except Neo4jStoreError:
+            logger.exception("Chat graph backend failed")
+            yield format_sse("error", {"detail": "Graph service unavailable"})
+        except TimeoutError:
+            logger.exception("Chat stream timed out")
+            yield format_sse("error", {"detail": "Chat request timed out"})
+        except Exception:
             logger.exception("Chat stream failed")
-            yield format_sse("error", {"detail": str(exc)})
+            yield format_sse("error", {"detail": "Chat stream failed"})
 
     return StreamingResponse(
         event_gen(),

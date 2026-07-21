@@ -79,7 +79,7 @@ def test_bootstrap_workspace_splits_llm_and_embedding_models(
     )
 
     root = tmp_path / "workspace"
-    GraphRAGWorkspace().bootstrap_workspace(root, force=True)
+    GraphRAGWorkspace(storage=object()).bootstrap_workspace(root, force=True)
     yaml = (root / "settings.yaml").read_text(encoding="utf-8")
     config = load_config(root)
     completion = config.get_completion_model_config("default_completion_model")
@@ -103,7 +103,9 @@ def test_bootstrap_workspace_rejects_local_embedding_model(
         "sentence-transformers/all-MiniLM-L6-v2",
     )
     with pytest.raises(ValueError, match="GRAPHRAG_EMBEDDING_MODEL"):
-        GraphRAGWorkspace().bootstrap_workspace(tmp_path / "workspace", force=True)
+        GraphRAGWorkspace(storage=object()).bootstrap_workspace(
+            tmp_path / "workspace", force=True
+        )
 
 
 def test_bootstrap_workspace_writes_graphrag3_settings(tmp_path: Path) -> None:
@@ -111,7 +113,7 @@ def test_bootstrap_workspace_writes_graphrag3_settings(tmp_path: Path) -> None:
     from graphrag.config.load_config import load_config
 
     root = tmp_path / "workspace"
-    GraphRAGWorkspace().bootstrap_workspace(root, force=True)
+    GraphRAGWorkspace(storage=object()).bootstrap_workspace(root, force=True)
     yaml = (root / "settings.yaml").read_text(encoding="utf-8")
     Template(yaml).substitute(
         GRAPHRAG_API_KEY="test-key",

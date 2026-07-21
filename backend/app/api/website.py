@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,8 @@ from app.core.dependencies import get_current_active_user, get_db
 from app.core.rate_limit import CRAWL_RULE, check_rate_limit
 from app.db.models import User
 from app.services.url_safety import UnsafeURLError, assert_public_url
-from app.services.website.crawl_tasks import schedule_website_crawl
+from app.services.job_events import register_job_meta
+from app.services.outbox import add_outbox_event
 from app.services.website.schemas import (
     WebsiteCrawlRequest,
     WebsiteCrawlSubmitResponse,
@@ -49,16 +50,27 @@ async def submit_website_crawl(
                 detail=f"Unsafe crawl URL: {exc}",
             ) from exc
 
-    job_id = schedule_website_crawl(
-        project_id,
-        url,
-        max_depth=body.max_depth,
-        max_pages=body.max_pages,
-        exclude_patterns=body.exclude_patterns,
-        respect_robots=body.respect_robots,
-        use_sitemap=body.use_sitemap,
-        rate_limit=body.rate_limit,
+    event_id = uuid4()
+    job_id = f"crawl:{project_id}:{event_id.hex[:12]}"
+    add_outbox_event(
+        db,
+        event_type="website_crawl",
+        aggregate_type="job",
+        aggregate_id=event_id,
+        project_id=project_id,
+        payload={
+            "job_id": job_id,
+            "url": url,
+            "max_depth": body.max_depth,
+            "max_pages": body.max_pages,
+            "exclude_patterns": body.exclude_patterns,
+            "respect_robots": body.respect_robots,
+            "use_sitemap": body.use_sitemap,
+            "rate_limit": body.rate_limit,
+        },
     )
+    await db.commit()
+    await register_job_meta(job_id, project_id=project_id, job_type="crawl")
     return WebsiteCrawlSubmitResponse(
         job_id=job_id,
         status="queued",

@@ -15,8 +15,8 @@ class SearchStore(Protocol):
         """Create the index if missing; fail fast on dimension mismatch."""
         ...
 
-    def upsert(self, documents: list[SearchDocument]) -> None:
-        """Bulk upsert documents (embeddings + payload)."""
+    def upsert(self, documents: list[SearchDocument]) -> int:
+        """Bulk upsert documents and return the acknowledged document count."""
         ...
 
     def dense_search(
@@ -59,6 +59,12 @@ class SearchStore(Protocol):
 
     def delete_by_project(self, project_id: str) -> None:
         """Delete all docs for a project_id."""
+        ...
+
+    def delete_old_project_generations(
+        self, project_id: str, keep_generation: int
+    ) -> None:
+        """Delete project documents not belonging to the published generation."""
         ...
 
     def delete_by_ids(self, ids: list[str]) -> None:

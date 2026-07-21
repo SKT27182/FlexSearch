@@ -45,7 +45,8 @@ async def get_current_user(
         raise credentials_exception
 
     user_id_str: str | None = payload.get("sub")
-    if user_id_str is None:
+    token_version = payload.get("ver")
+    if user_id_str is None or not isinstance(token_version, int):
         logger.debug("Auth rejected: missing subject in token")
         raise credentials_exception
 
@@ -62,6 +63,9 @@ async def get_current_user(
 
     if user is None:
         logger.debug("Auth rejected: user not found")
+        raise credentials_exception
+    if user.token_version != token_version:
+        logger.debug("Auth rejected: revoked token version")
         raise credentials_exception
 
     return user

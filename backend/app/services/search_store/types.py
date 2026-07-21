@@ -14,6 +14,7 @@ class SearchFilters(BaseModel):
 
     project_id: str | None = None
     document_id: str | None = None
+    rag_generation: int | None = None
     chunk_type: str | None = None
     parent_id: str | None = None
     summary_level: SummaryLevel | None = None
@@ -32,6 +33,9 @@ class SearchDocument(BaseModel):
     content: str
     project_id: str
     document_id: str
+    rag_generation: int = 1
+    embedding_model: str = ""
+    embedding_dimension: int = 0
     chunk_index: int = 0
     chunk_type: str | None = None
     parent_id: str | None = None
@@ -50,6 +54,9 @@ class SearchDocument(BaseModel):
             "content": self.content,
             "project_id": self.project_id,
             "document_id": self.document_id,
+            "rag_generation": self.rag_generation,
+            "embedding_model": self.embedding_model,
+            "embedding_dimension": self.embedding_dimension,
             "chunk_index": self.chunk_index,
             "summary_level": self.summary_level,
             "filename": self.filename,

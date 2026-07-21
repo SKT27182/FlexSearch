@@ -1,6 +1,5 @@
 """Graph mode config defaults."""
 
-from app.db.models import RagMode
 from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
 
 
@@ -18,7 +17,9 @@ def test_graph_indexing_fingerprint_changes_with_method() -> None:
 
 
 def test_vector_mode_has_chunking() -> None:
-    cfg = VectorRagConfig.from_db({"chunking": {"strategy": "fixed_window", "params": {}}})
+    cfg = VectorRagConfig.from_db(
+        {"chunking": {"strategy": "fixed_window", "params": {}}}
+    )
     assert cfg.chunking.strategy == "fixed_window"
 
 

@@ -2,7 +2,7 @@ import logging
 from logging import Logger
 import datetime
 import os
-from copy import deepcopy
+from copy import copy
 
 from typing import Optional, List, Literal, Callable, Dict
 
@@ -82,7 +82,7 @@ class CustomFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        formatted_record = deepcopy(record)
+        formatted_record = copy(record)
 
         level_name = formatted_record.levelname
         color = self.COLORS.get(level_name, "")

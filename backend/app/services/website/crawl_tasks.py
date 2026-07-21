@@ -20,10 +20,11 @@ def schedule_website_crawl(
     respect_robots: bool | None = None,
     use_sitemap: bool | None = None,
     rate_limit: float | None = None,
+    job_id: str | None = None,
 ) -> str:
     from app.services.celery_tasks import website_crawl_task
 
-    job_id = f"crawl:{project_id}:{uuid4().hex[:12]}"
+    job_id = job_id or f"crawl:{project_id}:{uuid4().hex[:12]}"
     register_job_meta_sync(job_id, project_id=project_id, job_type="crawl")
     website_crawl_task.apply_async(
         args=[job_id, str(project_id), url],
@@ -38,5 +39,7 @@ def schedule_website_crawl(
         task_id=job_id,
         queue="default",
     )
-    logger.info("Enqueued website crawl job_id=%s project=%s url=%s", job_id, project_id, url)
+    logger.info(
+        "Enqueued website crawl job_id=%s project=%s url=%s", job_id, project_id, url
+    )
     return job_id

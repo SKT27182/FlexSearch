@@ -125,9 +125,7 @@ class TestParentChildRetrieval:
             ) as emb,
         ):
             emb.return_value.embed.return_value = [0.1] * 8
-            results = await ParentChildRetrieval().retrieve(
-                "query", "proj", top_k=2
-            )
+            results = await ParentChildRetrieval().retrieve("query", "proj", top_k=2)
 
         assert len(results) == 2
         assert results[0].chunk_id == "parent-A"

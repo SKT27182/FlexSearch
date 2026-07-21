@@ -7,7 +7,9 @@ from pathlib import Path
 from uuid import UUID
 
 
-def raw_object_key(project_id: UUID | str, document_id: UUID | str, filename: str) -> str:
+def raw_object_key(
+    project_id: UUID | str, document_id: UUID | str, filename: str
+) -> str:
     ext = Path(filename).suffix or ".bin"
     return f"{project_id}/{document_id}/raw{ext}"
 

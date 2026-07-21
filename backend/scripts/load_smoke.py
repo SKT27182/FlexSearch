@@ -52,6 +52,7 @@ async def run(args: argparse.Namespace) -> int:
     sem = asyncio.Semaphore(args.concurrency)
 
     async with httpx.AsyncClient(base_url=base, timeout=60.0) as client:
+
         async def worker(i: int) -> None:
             async with sem:
                 if args.endpoint == "health":
@@ -95,9 +96,7 @@ def main() -> int:
         default=os.getenv("FLEXSEARCH_BASE_URL", "http://127.0.0.1:8889"),
     )
     parser.add_argument("--token", default=os.getenv("FLEXSEARCH_TOKEN", ""))
-    parser.add_argument(
-        "--project-id", default=os.getenv("FLEXSEARCH_PROJECT_ID", "")
-    )
+    parser.add_argument("--project-id", default=os.getenv("FLEXSEARCH_PROJECT_ID", ""))
     parser.add_argument(
         "--endpoint",
         choices=("health", "chat"),

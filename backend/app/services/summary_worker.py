@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.db.models import Document, DocumentStatus, RagMode
 from app.db.postgres import async_session_maker
-from app.schemas.rag_config import GraphRagConfig, VectorRagConfig, parse_rag_config
+from app.schemas.rag_config import GraphRagConfig, VectorRagConfig
 from app.services.document_status import update_document_status
 from app.services.document_worker import get_project_rag_context
 from app.services.summary.service import build_document_summaries, summary_meta_payload
@@ -17,17 +17,24 @@ from app.utils.logger import create_logger
 logger = create_logger(__name__)
 
 
-async def run_document_summary_job(document_id: UUID, project_id: UUID) -> dict:
+async def run_document_summary_job(
+    document_id: UUID, project_id: UUID, expected_generation: int
+) -> dict:
     """
     Build summaries for a vector document.
 
     Skips Microsoft GraphRAG projects and graph mode entirely.
     """
     async with async_session_maker() as db:
-        rag_mode, rag_config, _project = await get_project_rag_context(db, project_id)
+        rag_mode, rag_config, project = await get_project_rag_context(db, project_id)
+        if project.rag_generation != expected_generation:
+            return {"skipped": True, "reason": "stale_generation"}
 
         if rag_mode == RagMode.GRAPH:
-            if isinstance(rag_config, GraphRagConfig) and rag_config.graph_backend == "microsoft":
+            if (
+                isinstance(rag_config, GraphRagConfig)
+                and rag_config.graph_backend == "microsoft"
+            ):
                 logger.info(
                     "Skipping summaries for Microsoft GraphRAG project %s",
                     project_id,
@@ -54,7 +61,9 @@ async def run_document_summary_job(document_id: UUID, project_id: UUID) -> dict:
         await update_document_status(
             db,
             document,
-            status=document.status if document.status == DocumentStatus.COMPLETED else DocumentStatus.INDEXING,
+            status=document.status
+            if document.status == DocumentStatus.COMPLETED
+            else DocumentStatus.INDEXING,
             processing_step="Building hierarchical summaries…",
             progress_pct=92,
         )
@@ -63,9 +72,13 @@ async def run_document_summary_job(document_id: UUID, project_id: UUID) -> dict:
             job = await build_document_summaries(
                 project_id=str(project_id),
                 document_id=str(document_id),
+                generation=expected_generation,
                 filename=document.filename,
                 config=rag_config.summaries,
             )
+            await db.refresh(project)
+            if project.rag_generation != expected_generation:
+                return {"skipped": True, "reason": "stale_generation"}
         except Exception as exc:
             logger.exception("Summary build failed for %s", document_id)
             await update_document_status(

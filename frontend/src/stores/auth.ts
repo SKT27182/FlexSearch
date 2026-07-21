@@ -1,12 +1,10 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import { authApi, type User } from '@/lib/api';
+import { authApi, setAccessToken, type User } from '@/lib/api';
 import { useProjectStore } from './project';
 
 interface AuthState {
   user: User | null;
   accessToken: string | null;
-  refreshToken: string | null;
   isLoading: boolean;
   isInitialized: boolean;  // Track if initial auth check is done
 
@@ -15,15 +13,12 @@ interface AuthState {
   register: (email: string, name: string, password: string) => Promise<void>;
   logout: () => void;
   loadUser: () => Promise<void>;
-  setTokens: (access: string, refresh: string) => void;
 }
 
 export const useAuthStore = create<AuthState>()(
-  persist(
     (set, get) => ({
       user: null,
       accessToken: null,
-      refreshToken: null,
       isLoading: false,
       isInitialized: false,
 
@@ -31,11 +26,9 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true });
         try {
           const tokens = await authApi.login({ email, password });
-          localStorage.setItem('access_token', tokens.access_token);
-          localStorage.setItem('refresh_token', tokens.refresh_token);
+          setAccessToken(tokens.access_token);
           set({
             accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
           });
           await get().loadUser();
         } finally {
@@ -54,8 +47,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: () => {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
+        setAccessToken(null);
         
         // Clear project store state to prevent data leakage between users
         useProjectStore.getState().reset();
@@ -63,14 +55,12 @@ export const useAuthStore = create<AuthState>()(
         set({
           user: null,
           accessToken: null,
-          refreshToken: null,
           isInitialized: true,
         });
       },
 
       loadUser: async () => {
-        const token = localStorage.getItem('access_token');
-        if (!token) {
+        if (!get().accessToken) {
           set({ isInitialized: true, user: null });
           return;
         }
@@ -86,24 +76,15 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      setTokens: (access: string, refresh: string) => {
-        localStorage.setItem('access_token', access);
-        localStorage.setItem('refresh_token', refresh);
-        set({
-          accessToken: access,
-          refreshToken: refresh,
-        });
-      },
-    }),
-    {
-      name: 'auth-storage',
-      partialize: (state) => ({
-        accessToken: state.accessToken,
-        refreshToken: state.refreshToken,
-      }),
-    }
-  )
+    })
 );
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('flexsearch:unauthorized', () => {
+    useAuthStore.getState().logout();
+    if (window.location.pathname !== '/login') window.location.assign('/login');
+  });
+}
 
 // Derived selector for isAuthenticated
 export const useIsAuthenticated = () => 

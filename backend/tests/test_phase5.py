@@ -17,7 +17,11 @@ from app.services.job_events import (
     parse_project_id_from_job_id,
     register_job_meta,
 )
-from app.services.url_safety import UnsafeURLError, assert_public_url, is_safe_public_url
+from app.services.url_safety import (
+    UnsafeURLError,
+    assert_public_url,
+    is_safe_public_url,
+)
 
 
 async def create_user_and_login(client: AsyncClient, email: str) -> str:
@@ -69,21 +73,29 @@ def test_histogram_prometheus_cumulative_buckets():
     assert buckets.get("0.01") == 1.0
     assert buckets.get("0.25") == 2.0
     # Monotonic non-decreasing
-    ordered = [buckets[le] for le in sorted(buckets, key=lambda x: float("inf") if x == "+Inf" else float(x))]
+    ordered = [
+        buckets[le]
+        for le in sorted(
+            buckets, key=lambda x: float("inf") if x == "+Inf" else float(x)
+        )
+    ]
     assert ordered == sorted(ordered)
 
 
 @pytest.mark.asyncio
-async def test_metrics_and_health_endpoints(async_client: AsyncClient):
-    metrics_resp = await async_client.get("/metrics")
+async def test_metrics_and_health_endpoints(async_client: AsyncClient, monkeypatch):
+    monkeypatch.setattr("app.main.settings.operations_token", "test-operations-token")
+    headers = {"Authorization": "Bearer test-operations-token"}
+    assert (await async_client.get("/metrics")).status_code == 401
+    metrics_resp = await async_client.get("/metrics", headers=headers)
     assert metrics_resp.status_code == 200
     assert "flexsearch_" in metrics_resp.text
 
-    health = await async_client.get("/health")
+    health = await async_client.get("/health/live")
     assert health.status_code == 200
     body = health.json()
     assert "status" in body
-    assert "metrics" in body
+    assert body == {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +103,7 @@ async def test_metrics_and_health_endpoints(async_client: AsyncClient):
 # ---------------------------------------------------------------------------
 
 
-def test_ssrf_blocks_private_ips():
+def test_ssrf_blocks_private_ips(monkeypatch):
     with pytest.raises(UnsafeURLError):
         assert_public_url("http://127.0.0.1/admin")
     with pytest.raises(UnsafeURLError):
@@ -104,6 +116,9 @@ def test_ssrf_blocks_private_ips():
         assert_public_url("http://[::ffff:127.0.0.1]/")
     with pytest.raises(UnsafeURLError):
         assert_public_url("http://[::ffff:169.254.169.254]/latest/")
+    monkeypatch.setattr(
+        "app.services.url_safety.resolve_host_ips", lambda _host: ["93.184.216.34"]
+    )
     assert is_safe_public_url("https://example.com/docs") is True
 
 

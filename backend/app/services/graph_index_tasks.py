@@ -21,10 +21,6 @@ _DEBOUNCE_SECONDS = 5.0
 _STALE_INDEXING_SECONDS = 60 * 70
 _RUNNING = frozenset({"STARTED", "RETRY", "RECEIVED"})
 _TERMINAL = frozenset({"SUCCESS", "FAILURE", "REVOKED"})
-# Project ids with a build currently in flight. Prevents two builds for the
-# same project running concurrently when multiple documents finish in quick
-# succession.
-_in_flight: set[str] = set()
 
 
 def graph_rebuild_task_id(project_id: UUID) -> str:
@@ -53,23 +49,6 @@ async def _mark_graph_index_failed(project_id: UUID, error: str) -> None:
             passage_count=prev.passage_count,
         ).to_db()
         await db.commit()
-
-
-def _acquire_in_flight(project_id: UUID) -> bool:
-    """Try to mark a project as actively building. Return False if already busy."""
-    key = str(project_id)
-    if key in _in_flight:
-        return False
-    _in_flight.add(key)
-    return True
-
-
-def _release_in_flight(project_id: UUID) -> None:
-    _in_flight.discard(str(project_id))
-
-
-def is_graph_index_in_flight(project_id: UUID) -> bool:
-    return str(project_id) in _in_flight
 
 
 def _parse_started_at(value: datetime | str | None) -> datetime | None:
@@ -164,9 +143,6 @@ def is_graph_rebuild_alive(project_id: UUID) -> bool:
     Detects dead STARTED tasks (worker crash) via Celery inspect so status can
     recover without an API restart.
     """
-    if is_graph_index_in_flight(project_id):
-        return True
-
     from app.services.celery_tasks import rebuild_graph_index_task
 
     return _any_celery_tasks_alive(
@@ -329,6 +305,7 @@ def schedule_graph_index_rebuild(
     project_id: UUID,
     *,
     debounce_seconds: float = _DEBOUNCE_SECONDS,
+    generation: int | None = None,
 ) -> str | None:
     """Schedule a debounced Celery graph index rebuild for a project.
 
@@ -355,6 +332,7 @@ def schedule_graph_index_rebuild(
 
     async_result = rebuild_graph_index_task.apply_async(
         args=[str(project_id)],
+        kwargs={"generation": generation},
         task_id=task_id,
         queue="graph",
         countdown=max(0.0, float(debounce_seconds)),

@@ -38,7 +38,7 @@ import { BulkImportDialog } from '@/components/BulkImportDialog';
 import { subscribeProjectDocuments } from '@/hooks/useDocumentStatusStream';
 import { documentId, mergeDocumentsFromServer, processingDocuments, sortDocuments, upsertDocumentFromApi, upsertDocumentFromEvent } from '@/lib/document-state';
 import { canPreview, getGraphBackend, getProjectMode, isGraphMode, projectModeLabel, type DocumentStatusEvent, type ProjectMode, type RagConfig, type RetrievalOverrides } from '@/lib/rag-types';
-import { defaultRagConfigForMode, projectModeFromRag, projectModeToRagMode } from '@/components/RagConfigForm';
+import { defaultRagConfigForMode, projectModeFromRag, projectModeToRagMode } from '@/lib/rag-types';
 
 const PROCESSING_STATUSES = new Set([
   'uploaded',
@@ -819,7 +819,9 @@ export function ProjectDetailPage() {
                               Match {index + 1} ({(chunk.score * 100).toFixed(1)}%)
                             </span>
                             <span className="text-[10px] text-muted-foreground">
-                              {chunk.metadata.filename || 'Unknown'}
+                              {typeof chunk.metadata.filename === 'string'
+                                ? chunk.metadata.filename
+                                : 'Unknown'}
                             </span>
                           </div>
                           <p className="text-sm leading-relaxed">{chunk.content}</p>

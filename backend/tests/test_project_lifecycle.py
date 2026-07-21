@@ -5,31 +5,17 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
-from app.db.models import Project, RagMode
+from app.db.models import OutboxEvent, Project, RagMode
 from app.services.project_lifecycle import delete_project_fully
 
 
 @pytest.mark.asyncio
-async def test_delete_project_fully_wipes_microsoft_graph_workspace(
+async def test_delete_project_fully_creates_durable_cleanup_tombstone(
     db_session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_id = uuid4()
-    wiped: list[tuple[str, str | None]] = []
-
-    def _record_wipe(
-        pid,
-        *,
-        from_mode: str,
-        graph_backend: str | None = None,
-    ) -> None:
-        wiped.append((from_mode, graph_backend))
-
-    monkeypatch.setattr(
-        "app.services.project_lifecycle.wipe_index_for_mode",
-        _record_wipe,
-    )
 
     project = Project(
         id=project_id,
@@ -44,4 +30,14 @@ async def test_delete_project_fully_wipes_microsoft_graph_workspace(
     await delete_project_fully(db_session, project)
     await db_session.commit()
 
-    assert wiped == [("graph", "microsoft")]
+    await db_session.refresh(project)
+    assert project.deleting_at is not None
+    event = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == project_id,
+                OutboxEvent.event_type == "cleanup_project",
+            )
+        )
+    ).scalar_one()
+    assert event.project_id == project_id

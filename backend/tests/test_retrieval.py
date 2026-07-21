@@ -70,7 +70,7 @@ class TestRetrievalQuery:
 
         monkeypatch.setattr(
             "app.api.retrieval.create_pipeline",
-            lambda config=None, rag_mode=None: FakePipeline(),
+            lambda *_args, **_kwargs: FakePipeline(),
         )
 
         response = await async_client.post(

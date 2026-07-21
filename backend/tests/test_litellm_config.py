@@ -19,7 +19,6 @@ from app.services.litellm_config import (
 import litellm  # after litellm_config installs AWS-preload filter
 
 
-
 def test_vector_embedding_endpoint_local_when_no_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

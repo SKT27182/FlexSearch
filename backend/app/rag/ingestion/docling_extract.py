@@ -16,6 +16,7 @@ from app.rag.ingestion.base import (
     ExtractedContent,
     ExtractionProgressCallback,
 )
+from app.rag.ingestion.document_limits import validate_document_limits
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -51,6 +52,7 @@ class DoclingExtractionStrategy(BaseExtractionStrategy):
         *,
         on_progress: ExtractionProgressCallback | None = None,
     ) -> ExtractedContent:
+        validate_document_limits(content, content_type)
         if content_type in {"text/plain", "text/markdown"}:
             text = content.decode("utf-8", errors="replace")
             return ExtractedContent(

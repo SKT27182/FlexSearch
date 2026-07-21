@@ -455,8 +455,8 @@ Sitemap discover limit (**500**) is hardcoded in `sitemap.py`, not a settings fi
 
 1. **Sitemap index recursion** — child sitemap `.xml` URLs are skipped; multi-file indexes under-discover pages.
 2. **No `Sitemap:` from robots.txt** — only fixed `/sitemap.xml` and `/sitemap_index.xml` paths.
-3. **SSRF DNS TOCTOU** — resolve-at-check vs resolve-at-connect; no pinned IP.
-4. **No page / HTML size cap** — large responses are loaded fully into memory.
+3. **Strict public-only networking** — private/internal sites are intentionally unreachable; each DNS result and redirect is validated and connection-pinned.
+4. **Response and crawl ceilings** — remote bodies and total pages are bounded; operators must tune the documented limits for unusually large public sites.
 5. **No crawl job cancel API** — ingest has revoke helpers; crawl tasks do not expose user cancel.
 6. **Raw HTML not stored** — only markdown with a `source_url` comment.
 7. **Query string collapsed in normalize** — `normalise_url` rebuilds `scheme://netloc/path` only, so `?utm=…` twins share one visit (good for tracking params) but content-bearing queries (`?page=2`) also collapse to the same key and are not crawled separately.

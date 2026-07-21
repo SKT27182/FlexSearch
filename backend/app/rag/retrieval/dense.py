@@ -39,6 +39,7 @@ class DenseRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         """Retrieve using dense vector search."""
         embedding_service = get_embedding_service()
@@ -47,7 +48,9 @@ class DenseRetrieval(BaseRetrievalStrategy):
         store = get_search_store()
         hits = store.dense_search(
             query_vector=query_vector,
-            filters=filters_for_hierarchy(project_id, self._hierarchy_mode),
+            filters=filters_for_hierarchy(
+                project_id, self._hierarchy_mode, rag_generation=rag_generation
+            ),
             top_k=top_k,
             score_threshold=self._score_threshold,
         )

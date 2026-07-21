@@ -41,6 +41,7 @@ Thumbs.db
 
 # Test artifacts
 test.db
+celerybeat-schedule*
 *.sqlite
 
 # Build

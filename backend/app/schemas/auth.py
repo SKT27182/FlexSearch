@@ -37,6 +37,9 @@ class TokenPayload(BaseModel):
 
     sub: str  # user_id
     role: str
+    ver: int
+    iat: int
+    jti: str
     exp: int
 
 

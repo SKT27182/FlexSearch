@@ -42,18 +42,16 @@ from app.schemas.rag_config import (
     default_rag_config_for_mode,
     parse_rag_config,
 )
-from app.rag.pipeline import create_pipeline
 from app.services.document_tasks import schedule_process_document
 from app.services.document_worker import ReindexMode
 from app.services.graph_index_tasks import schedule_graph_index_rebuild
 from app.services.graphrag_workspace import (
     GRAPHML_CANDIDATES,
     PARQUET_FILES,
-    get_graphrag_workspace,
     graphrag_storage_prefix,
 )
 from app.services.project_access import user_can_access_project, user_owns_project
-from app.services.project_index_service import wipe_index_for_mode
+from app.services.outbox import add_outbox_event
 from app.services.project_lifecycle import delete_project_fully
 from app.services.storage import get_storage_service
 from app.utils.logger import create_logger
@@ -64,7 +62,11 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 async def _doc_count(db: AsyncSession, project_id: UUID) -> int:
-    q = select(func.count()).select_from(Document).where(Document.project_id == project_id)
+    q = (
+        select(func.count())
+        .select_from(Document)
+        .where(Document.project_id == project_id)
+    )
     return (await db.execute(q)).scalar() or 0
 
 
@@ -73,7 +75,9 @@ async def _get_owned_project(
     project_id: UUID,
     current_user: User,
 ) -> Project:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -121,22 +125,22 @@ async def list_projects(
     skip: int = 0,
     limit: int = 100,
 ) -> ProjectListResponse:
-    query = select(Project).where(Project.owner_id == current_user.id)
+    query = select(Project).where(
+        Project.owner_id == current_user.id, Project.deleting_at.is_(None)
+    )
     query = query.offset(skip).limit(limit).order_by(Project.created_at.desc())
     projects = (await db.execute(query)).scalars().all()
 
     count_query = (
         select(func.count())
         .select_from(Project)
-        .where(Project.owner_id == current_user.id)
+        .where(Project.owner_id == current_user.id, Project.deleting_at.is_(None))
     )
     total = (await db.execute(count_query)).scalar() or 0
 
     responses = []
     for project in projects:
-        responses.append(
-            project_to_response(project, await _doc_count(db, project.id))
-        )
+        responses.append(project_to_response(project, await _doc_count(db, project.id)))
     return ProjectListResponse(projects=responses, total=total)
 
 
@@ -146,7 +150,9 @@ async def get_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectResponse:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -162,7 +168,9 @@ async def update_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectResponse:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -192,7 +200,9 @@ async def reindex_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ReindexResponse:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -209,12 +219,23 @@ async def reindex_project(
     # Include stuck/failed/in-progress docs — COMPLETED-only left ghosts after
     # worker crashes (UI stuck at extracting 40%, reindex no-ops).
     for doc in documents:
-        schedule_process_document(
-            doc.id,
-            project_id,
-            force_full_extract=force,
-            mode=mode,
+        doc.status = DocumentStatus.STORED
+        doc.processing_step = "Queued for reindex"
+        doc.progress_pct = 25
+        doc.error_message = None
+        add_outbox_event(
+            db,
+            event_type="process_document",
+            aggregate_type="document",
+            aggregate_id=doc.id,
+            project_id=project_id,
+            payload={
+                "generation": project.rag_generation,
+                "mode": mode.value,
+                "force_full_extract": force,
+            },
         )
+    await db.commit()
 
     return ReindexResponse(
         processed=len(documents),
@@ -230,7 +251,9 @@ async def delete_project(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -270,7 +293,9 @@ async def get_graph_index_status(
     )
 
 
-@router.post("/{project_id}/graph-index/rebuild", response_model=GraphIndexStatusResponse)
+@router.post(
+    "/{project_id}/graph-index/rebuild", response_model=GraphIndexStatusResponse
+)
 async def rebuild_graph_index(
     project_id: UUID,
     current_user: Annotated[User, Depends(get_current_active_user)],
@@ -288,7 +313,11 @@ async def rebuild_graph_index(
             indexing_started_at=started,
         ).to_db()
         await db.commit()
-        schedule_graph_index_rebuild(project_id, debounce_seconds=0.0)
+        schedule_graph_index_rebuild(
+            project_id,
+            debounce_seconds=0.0,
+            generation=project.rag_generation,
+        )
     else:
         project.graph_index_status = GraphIndexState(
             backend="neo4j",
@@ -307,6 +336,7 @@ async def rebuild_graph_index(
                 project_id,
                 force_full_extract=False,
                 mode=ReindexMode.FROM_EXTRACTED,
+                generation=project.rag_generation,
             )
     state = GraphIndexState.from_db(project.graph_index_status)
     return GraphIndexStatusResponse(
@@ -343,7 +373,7 @@ async def export_graph(
         )
 
     storage = get_storage_service()
-    prefix = graphrag_storage_prefix(project_id)
+    prefix = graphrag_storage_prefix(project_id, project.rag_generation)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name in PARQUET_FILES:
@@ -371,7 +401,11 @@ async def export_graph(
     )
 
 
-@router.patch("/{project_id}/rag-mode", response_model=RagModeSwitchResponse)
+@router.patch(
+    "/{project_id}/rag-mode",
+    response_model=RagModeSwitchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def switch_rag_mode(
     project_id: UUID,
     body: RagModeSwitchRequest,
@@ -392,18 +426,20 @@ async def switch_rag_mode(
     if new_mode == old_mode and (
         new_mode != RagMode.GRAPH or new_backend == old_backend
     ):
-        return RagModeSwitchResponse(
-            rag_mode=new_mode.value,
-            message="Project is already in the requested mode",
-            documents_queued=0,
+        raise HTTPException(
+            status_code=409, detail="Project is already in the requested mode"
         )
 
-    wipe_index_for_mode(
-        project_id,
-        from_mode=old_mode.value if isinstance(old_mode, RagMode) else str(old_mode),
-        graph_backend=old_backend,
+    project.rag_previous_mode = (
+        old_mode.value if isinstance(old_mode, RagMode) else old_mode
     )
+    project.rag_previous_backend = old_backend
+    project.rag_previous_generation = project.rag_generation
     project.rag_mode = new_mode
+    project.rag_generation += 1
+    project.rag_transition_status = "switching"
+    project.rag_transition_error = None
+    project.rag_transition_started_at = datetime.now(timezone.utc)
     if new_mode == RagMode.GRAPH:
         project.rag_config = default_rag_config_for_mode(
             new_mode, graph_backend=new_backend
@@ -412,25 +448,28 @@ async def switch_rag_mode(
     else:
         project.rag_config = default_rag_config_for_mode(new_mode).to_db()
         project.graph_index_status = None
-    await db.commit()
-
     docs_result = await db.execute(
         select(Document).where(Document.project_id == project_id)
     )
     documents = docs_result.scalars().all()
-    for doc in documents:
-        schedule_process_document(
-            doc.id,
-            project_id,
-            force_full_extract=False,
-            mode=ReindexMode.AUTO,
-        )
+    for document in documents:
+        document.status = DocumentStatus.STORED
+        document.processing_step = "Queued for RAG generation rebuild"
+        document.progress_pct = 25
+        document.error_message = None
+    add_outbox_event(
+        db,
+        event_type="rag_mode_rebuild",
+        aggregate_type="project",
+        aggregate_id=project_id,
+        project_id=project_id,
+        payload={"generation": project.rag_generation},
+    )
+    await db.commit()
 
     return RagModeSwitchResponse(
         rag_mode=new_mode.value,
-        message=(
-            f"Switched from {old_mode.value} to {new_mode.value}. "
-            "Previous index data was removed; documents are reprocessing."
-        ),
-        documents_queued=len(documents),
+        generation=project.rag_generation,
+        transition_status="switching",
+        documents_total=len(documents),
     )

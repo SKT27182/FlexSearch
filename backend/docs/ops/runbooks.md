@@ -6,7 +6,7 @@ Short incident playbooks for operators. Pair with [ops README](./README.md) and 
 
 ## R1 — Empty retrieval rate spike
 
-**Symptoms:** `/health` → `metrics.empty_retrieval_rate` rising; users see “could not find relevant information”; `flexsearch_chat_empty_retrieval_total` / `flexsearch_retrieval_empty_total` climbing.
+**Symptoms:** protected `/metrics` shows `flexsearch_chat_empty_retrieval_total` or `flexsearch_retrieval_empty_total` rising; users see “could not find relevant information.”
 
 **Checks**
 
@@ -57,7 +57,7 @@ Confirm queues: `ingest`, `graph`, `summary`, `default`. Confirm `CELERY_TASK_AL
 
 ## R3 — OpenSearch unreachable
 
-**Symptoms:** `/health` degraded; retrieval/chat errors; ingest fails at indexing.
+**Symptoms:** protected `/health/ready` is not ready; retrieval/chat errors; ingest fails at indexing.
 
 **Checks**
 
@@ -150,12 +150,12 @@ curl -s "$OPENSEARCH_URL"
 2. Celery: `inspect active` for `rebuild_graph_index_task` / `process_document_task`.
 3. API startup already ran `reconcile_interrupted_graph_indexes()` — refresh graph status API (triggers `reconcile_stale_graph_index` where wired).
 4. Stale timeout is ~70 minutes from `indexing_started_at` when the Celery task is dead.
-5. Multi-worker: process-local `_in_flight` does not block other processes — look for overlapping rebuilds in logs.
+5. Check the project Redis lease, heartbeat renewal, and database RAG generation; a stale generation must never publish.
 
 **Mitigations**
 
 - Click **Rebuild** (or schedule rebuild with `debounce_seconds=0`) after status reconciles to `failed`.
-- Ensure only one graph consumer if duplicate builds appear.
+- If a lease is abandoned after worker death, allow it to expire; do not delete an active lease manually.
 - For Neo4j mode-switch wipe failures, check whether `wipe_neo4j_graph` → `delete_project_graph` AttributeError appears in logs (method should be `delete_project_subgraph`); wipe/fix manually if needed, then rebuild.
 - Confirm `API_KEY` is set for Graph RAG paths.
 
@@ -173,12 +173,12 @@ curl -s "$OPENSEARCH_URL"
 
 ---
 
-## Quick reference — Celery (no Beat)
+## Quick reference — Celery and Beat
 
 | Item | Value |
 |---|---|
 | Queues | `ingest`, `graph`, `summary`, `default` |
-| Beat | None |
+| Beat | Dedicated scheduler dispatches outbox and reconciliation work |
 | Broker | Same Redis as SSE |
 | Eager | Tests only (`CELERY_TASK_ALWAYS_EAGER`) |
 | Crawl/bulk | `default` → create_and_enqueue → `ingest` |

@@ -13,7 +13,7 @@ Production ops for the enterprise RAG stack: metrics, rate limits, logging, secu
 | **Metrics** | Counters and histograms the process keeps in memory and exposes as Prometheus text | Trends and alerts (empty retrieval rate, stage p95, 429 storms) without reading every log line |
 | **Tracing (here)** | Stage timers (`timed_stage`) that feed those histograms — **not** distributed OpenTelemetry traces | Shows which chat/ingest stage is slow; no cross-service span graph |
 | **Logging** | Human-readable event stream (console + file), including bridged third-party libs | Root-cause detail once metrics tell you *that* something is wrong |
-| **Health check** | Lightweight dependency + snapshot probe (`GET /health`) | Load balancers / operators: is OpenSearch/Redis up? Is empty-retrieval rate already bad? |
+| **Health check** | Public process liveness plus protected dependency readiness | Load balancers use `/health/live`; operators use `/health/ready` without exposing topology publicly |
 | **Rate limiting** | Cap requests per user/IP per minute on expensive routes | Protects LLM spend, crawl/bulk abuse, and shared Redis/CPU under load |
 | **SSRF** | Server-side request forgery: tricking the server into fetching an internal URL | Crawl/bulk fetch on behalf of users; without URL safety, a “public” crawl could hit metadata IPs or private nets |
 | **Worker topology** | Which Celery processes consume which named queues | Explains backlog, starvation (OCR ingest blocking crawl), and when to split consumers |
@@ -37,7 +37,7 @@ Industry stacks often ship three pillars. FlexSearch implements a **pragmatic su
 
 **Mental model:** metrics are the dashboard lights; logs are the black box; stage histograms are a poor-man’s trace for “which step inside this process.” When something is wrong:
 
-1. **Notice** via `/health` snapshot or Prometheus alert (rate, latency, 429s).
+1. **Notice** via protected Prometheus alerts or `/health/ready` (rate, latency, 429s).
 2. **Localize** with stage histograms (`rewrite` vs `retrieve` vs `generate`) or queue/worker inspect.
 3. **Explain** with API or worker logs (exception text, SSRF reject, Celery discard).
 
@@ -51,15 +51,15 @@ Operators do not need every series on a wall. Watch a short list that maps to us
 
 | Watch | Why | Healthy-ish example | Bad example → next step |
 |---|---|---|---|
-| **Empty retrieval rate** (`/health` → `metrics.empty_retrieval_rate`, or chat empty ÷ chat requests) | Users asked; we found nothing usable | Low single-digit % on a populated project | Spike after deploy/reindex → [R1](./runbooks.md) (OpenSearch health, completed docs, stage over-narrowing) |
+| **Empty retrieval rate** (Prometheus chat empty ÷ chat requests) | Users asked; we found nothing usable | Low single-digit % on a populated project | Spike after deploy/reindex → [R1](./runbooks.md) |
 | **Stage latency** (`flexsearch_stage_latency_seconds`) | Answers “where did the time go?” | `retrieve` and `generate` both modest | Only `llm` / `generate` balloons → provider/token path; only `ingest` / extract → OCR/worker CPU |
 | **Rate-limit hits** (`flexsearch_rate_limit_hits_total`) | Abuse, misconfigured client, or limits too tight | Occasional bumps from chatty UIs | Sustained 429 storm on `chat` or `crawl` → [R5](./runbooks.md); check Redis vs memory fallback |
 | **Ingest outcomes** (`flexsearch_ingest_documents_total{status}`) | Pipeline completing vs failing | Mostly `completed` | Rise in `failed` / `missing` → worker logs + document status |
 | **Worker queues / backlog** (Celery inspect, stuck doc statuses) | Async path is the product for crawl/bulk/upload | Active tasks turn over; statuses advance | Docs stuck in `extracting` / crawl SSE idle → [R2](./runbooks.md); check `-Q` and concurrency |
-| **Dependency health** (`GET /health` OpenSearch + Redis) | Search and broker/SSE share Redis | Both reachable | OpenSearch down → [R3](./runbooks.md); Redis down → rate limits fall back to memory, SSE/Celery degrade |
+| **Dependency readiness** (protected `GET /health/ready`) | Confirms required datastores are reachable | Ready without raw exception details | OpenSearch down → [R3](./runbooks.md); Redis down blocks mandatory distributed coordination |
 | **LLM / token counters** | Cost and provider pressure | Steady tokens per chat | Token spike with flat chat volume → stages doing N retrieves or graph rebuild LLM load |
 
-**Worked example — “chat feels broken”:** `/health` shows Redis OK and `empty_retrieval_rate` 0.55. Scrape `/metrics`: chat requests normal, empty counter climbing, stage histograms show fast `retrieve`. That pattern points to *index content / embeddings / over-aggressive query stages*, not a dead worker. Open Search lab with the same query; if lab is also empty, fix indexing (R1), not Celery.
+**Worked example — “chat feels broken”:** protected `/metrics` shows normal chat requests, a climbing empty counter, and fast `retrieve` histograms. That pattern points to index content, embeddings, or over-aggressive query stages rather than a dead worker.
 
 **Worked example — “uploads never finish”:** empty-retrieval rate is fine; documents sit in `indexing`. `celery inspect reserved` shows a long OCR task on `ingest` while `default` crawl jobs pile up on the same combined worker. Split or raise concurrency for `ingest` vs `default` (topology below + R2).
 
@@ -70,14 +70,14 @@ Operators do not need every series on a wall. Watch a short list that maps to us
 ```
 Frontend → FastAPI (/api/chat, /crawl, /bulk, /jobs/.../events, /documents/.../events)
               │
-              ├─ in-process metrics → GET /metrics (Prometheus text; no OTel)
+              ├─ in-process metrics → protected GET /metrics
               ├─ rate limits (Redis sliding window, memory fallback)
               ├─ unified logging (colored console + file; GraphRAG/LiteLLM bridged)
               ├─ ChatOrchestrator → stages → RAGPipeline → OpenSearch / Neo4j
               └─ Celery workers (ingest | graph | summary | default) ← same Redis
 ```
 
-Infra (OpenSearch, Redis, Postgres, Neo4j, MinIO) is consumed from **infra-hub as-is**. FlexSearch does not run Celery Beat.
+Infra (OpenSearch, Redis, Postgres, Neo4j, MinIO) is consumed from **infra-hub as-is**. A dedicated Celery Beat process dispatches the transactional outbox.
 
 ---
 
@@ -87,10 +87,11 @@ Infra (OpenSearch, Redis, Postgres, Neo4j, MinIO) is consumed from **infra-hub a
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /metrics` | Prometheus text exposition (`METRICS_ENABLED=false` → 404) |
-| `GET /health` | OpenSearch + Redis smoke + JSON `metrics` snapshot |
+| `GET /health/live` | Public process-only liveness |
+| `GET /health/ready` | Operations-token-protected dependency readiness |
+| `GET /metrics` | Operations-token-protected Prometheus text exposition |
 
-`/health` is the operator-friendly probe: dependency reachability plus a compact metrics snapshot (including `empty_retrieval_rate`). `/metrics` is for Prometheus scrapes and richer series.
+Readiness and metrics never appear in public liveness. Supply `Authorization: Bearer $OPERATIONS_TOKEN` from the internal monitoring network.
 
 ### Implementation notes
 
@@ -112,7 +113,7 @@ Because metrics are process-local, multi-replica API scrapes must be aggregated 
 | `flexsearch_ingest_documents_total{status}` | Ingest outcomes (`completed`, `failed`, `missing`, …) |
 | `flexsearch_rate_limit_hits_total{rule}` | 429s by rule name |
 
-Empty-retrieval rate ≈ `chat_empty / chat_requests` (also on `/health` → `metrics.empty_retrieval_rate`). That ratio is the primary “users asked, we found nothing” signal — see runbook R1.
+Empty-retrieval rate ≈ `chat_empty / chat_requests`. That ratio is the primary “users asked, we found nothing” signal — see runbook R1.
 
 Stage timings are collected even when project `chat.debug` is off. Debug SSE still only emits when the project enables `chat.debug`.
 
@@ -125,9 +126,11 @@ scrape_configs:
     static_configs:
       - targets: ["127.0.0.1:8889"]
     metrics_path: /metrics
+    authorization:
+      credentials: "${OPERATIONS_TOKEN}"
 ```
 
-Bind `/metrics` privately or put scrape ACL in front — the endpoint is unauthenticated.
+Keep `/metrics` on an internal route and use the mandatory operations bearer token.
 
 ---
 
@@ -141,7 +144,7 @@ Bind `/metrics` privately or put scrape ACL in front — the endpoint is unauthe
 - Crawl and bulk enqueue heavy Celery work; without caps, one user can flood `default` → `ingest` and starve everyone else’s uploads.
 - Suggestions / follow-up are lighter but still LLM-backed — `SENSITIVE_RULE` keeps chip endpoints from becoming a free token faucet.
 
-Redis keeps the window **consistent across API replicas**. Without Redis, each process enforces its own in-memory window — limits look looser or uneven under multi-replica load (and `/health` will already flag Redis as down).
+Redis keeps limits consistent across API replicas and is mandatory for graph-build leases. Readiness fails while Redis is unavailable; authentication limits retain a bounded local safety fallback.
 
 Env (see `backend/.env.example`):
 
@@ -198,7 +201,7 @@ There is **no Celery Beat**: nothing runs on a cron. Work appears only when the 
 |---|---|
 | Compose `worker` | **One** container, `-Q ingest,graph,summary,default`, concurrency `2` |
 | `make worker-local` / `dev-local` | Same queues/concurrency on the host |
-| Beat | **None** — no periodic tasks |
+| Beat | Dedicated scheduler container dispatches transactional outbox events and reconciliation work |
 
 | Queue | Work |
 |---|---|
@@ -211,7 +214,7 @@ Crawl/bulk path: `default` → `create_and_enqueue_document` → `ingest`.
 
 Known graph caveats (ops-relevant):
 
-- Process-local `_in_flight` set does **not** coordinate across multiple worker processes (Celery task-id coalesce is the cross-process guard). Task passes `manage_in_flight=False` so the workspace does not double-acquire in-process.
+- Microsoft GraphRAG rebuilds use a renewable Redis lease across worker processes and PostgreSQL RAG generations for fencing.
 - API startup runs `reconcile_interrupted_graph_indexes()`; status can call `reconcile_stale_graph_index()`.
 - Mode-switch Neo4j wipe: `wipe_neo4j_graph` → `delete_project_subgraph` (aligned with `Neo4jStore`).
 
@@ -233,13 +236,13 @@ Crawl jobs register meta at schedule time (`crawl:{project_id}:{hex}`). Bulk job
 
 **Conceptually:** SSRF (server-side request forgery) is when an attacker asks *your* server to fetch a URL they choose — often aiming at `http://169.254.169.254/` (cloud metadata), `http://localhost:...`, or a private VPC IP. Crawl and bulk import legitimately fetch remote URLs on behalf of the user; without checks, that feature is an open proxy into your network.
 
-FlexSearch mitigates this when `CRAWL_BLOCK_PRIVATE_URLS=true` (default) via `app/services/url_safety.py`:
+FlexSearch mitigates this through the shared safe outbound client:
 
-- Rejects private, loopback, link-local, CGNAT, cloud metadata IPs **after DNS resolve** (hostname → IPs, then block-list)
+- Resolves once, rejects any private, loopback, link-local, CGNAT, metadata, reserved, multicast, or mapped-private result, and pins the approved address for the connection
 - Blocks `localhost` / `*.local`
-- Crawl and bulk URL fetches do **not** blindly follow redirects; each hop is re-checked and crawl stays same-domain
+- Disables environment proxies and automatic redirects; every redirect target is independently resolved, validated, and pinned
 
-**Operator view:** a user reports “crawl failed for our internal wiki” — that may be **working as intended** if the host resolves to a private range. Distinguish product SSRF policy (R4) from a broken public DNS target. Known gap: DNS TOCTOU (resolve-at-check vs resolve-at-connect); see crawler/bulk docs.
+**Operator view:** a user reports “crawl failed for our internal wiki” — that may be **working as intended** if the host resolves to a private range. Distinguish the product SSRF policy from a broken public DNS target.
 
 ### ACL audit
 
@@ -295,7 +298,7 @@ See [runbooks.md](./runbooks.md) for incident playbooks:
 
 ## Related
 
-- [Celery](../celery/README.md) — queues, task ids, SSE, no Beat
+- [Celery](../celery/README.md) — queues, outbox dispatch, task ids, leases, and SSE
 - [Eval harness](../eval/README.md)
 - [Crawler](../crawler/README.md)
 - [Chat](../chat/README.md)

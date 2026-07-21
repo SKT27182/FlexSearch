@@ -1,9 +1,11 @@
 """Tests for RagConfig schemas and factory."""
 
+import pytest
+from pydantic import ValidationError
+
 from app.db.models import RagMode
 from app.rag.factory import (
     build_chunking_strategy,
-    build_extraction_strategy,
     build_graph_retrieval_strategy,
     build_retrieval_strategy,
 )
@@ -44,8 +46,32 @@ def test_factory_builds_chunking_with_params() -> None:
 
 
 def test_factory_recursive() -> None:
-    cfg = ChunkingConfig(strategy="recursive", params={"chunk_size": 400, "overlap": 40})
+    cfg = ChunkingConfig(
+        strategy="recursive", params={"chunk_size": 400, "overlap": 40}
+    )
     assert isinstance(build_chunking_strategy(cfg), RecursiveChunking)
+
+
+@pytest.mark.parametrize(
+    "strategy,params",
+    [
+        ("fixed_window", {"chunk_size": 128, "overlap": 128}),
+        ("recursive", {"chunk_size": 128, "overlap": 129}),
+        (
+            "parent_child",
+            {"parent_chunk_size": 256, "child_chunk_size": 300, "overlap": 10},
+        ),
+        (
+            "parent_child",
+            {"parent_chunk_size": 500, "child_chunk_size": 100, "overlap": 100},
+        ),
+        ("semantic", {"min_chunk_size": 500, "max_chunk_size": 128}),
+        ("fixed_window", {"chunk_size": 256, "overlap": 10, "mystery": True}),
+    ],
+)
+def test_invalid_chunking_configuration_is_rejected(strategy, params) -> None:
+    with pytest.raises(ValidationError):
+        ChunkingConfig(strategy=strategy, params=params)
 
 
 def test_rag_config_from_settings_shape() -> None:
@@ -91,7 +117,9 @@ def test_bm25_retrieval_factory() -> None:
 
 
 def test_hybrid_retrieval_factory() -> None:
-    r = build_retrieval_strategy(RetrievalConfig(strategy="hybrid", params={"rrf_k": 42}))
+    r = build_retrieval_strategy(
+        RetrievalConfig(strategy="hybrid", params={"rrf_k": 42})
+    )
     assert r.name == "hybrid"
     assert r._rrf_k == 42
 
@@ -141,7 +169,9 @@ def test_neo4j_graph_retrieval_factory() -> None:
 
 
 def test_parse_rag_config_modes() -> None:
-    vector = parse_rag_config(RagMode.VECTOR, {"chunking": {"strategy": "fixed_window"}})
+    vector = parse_rag_config(
+        RagMode.VECTOR, {"chunking": {"strategy": "fixed_window"}}
+    )
     graph = parse_rag_config(RagMode.GRAPH, {"retrieval": {"strategy": "graph_global"}})
     assert isinstance(vector, VectorRagConfig)
     assert isinstance(graph, GraphRagConfig)

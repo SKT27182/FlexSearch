@@ -160,7 +160,9 @@ def _patch_exponential_retry() -> None:
     if getattr(ExponentialRetry, "_flexsearch_rate_limit", False):
         return
 
-    def retry_with_logging(self, *, func: Callable[..., Any], input_args: dict[str, Any]) -> Any:
+    def retry_with_logging(
+        self, *, func: Callable[..., Any], input_args: dict[str, Any]
+    ) -> Any:
         retries = 0
         delay = 1.0
         metrics = input_args.get("metrics")

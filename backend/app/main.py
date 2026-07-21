@@ -4,12 +4,12 @@ FlexSearch Backend - FastAPI Application
 Main entry point for the RAG platform API.
 """
 
-import signal
-import sys
+import asyncio
+import secrets
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -25,12 +25,22 @@ from app.utils.logging_bridge import (
     setup_unified_logging,
 )
 
-from app.api import admin, auth, bulk, chat, documents, jobs, projects, rag, retrieval, website
+from app.api import (
+    admin,
+    auth,
+    bulk,
+    chat,
+    documents,
+    jobs,
+    projects,
+    rag,
+    retrieval,
+    website,
+)
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.core.security import verify_password
 from app.db.postgres import close_db, init_db
-from app.services.neo4j_store import get_neo4j_store
 from app.services.redis_client import close_redis
 from app.db.models import User
 
@@ -55,11 +65,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     logger.info("Database initialized")
     try:
-        get_neo4j_store().ensure_schema()
-        logger.info("Neo4j schema ensured")
-    except Exception as exc:
-        logger.warning("Neo4j schema bootstrap skipped: %s", exc)
-    try:
         from app.services.graph_index_tasks import (
             reconcile_interrupted_graph_indexes,
         )
@@ -75,26 +80,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Cleanup complete")
 
 
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-
-# Setup signal handlers
-setup_signal_handlers()
-
-
 # Create FastAPI app
 app = FastAPI(
     title="FlexSearch RAG Platform",
     description="High-Performance, Local-First Modular RAG Platform",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -119,6 +109,7 @@ async def get_docs_auth(
         )
 
     return credentials.username
+
 
 # CORS configuration
 app.add_middleware(
@@ -147,52 +138,59 @@ async def root() -> dict:
     """Root endpoint."""
     return {
         "name": "FlexSearch RAG Platform",
-        "version": "0.1.0",
+        "version": "1.0.0",
         "status": "running",
     }
 
 
-@app.get("/health")
-async def health_check() -> dict:
-    """Health check endpoint (includes OpenSearch + Redis smoke status)."""
-    services: dict[str, str] = {}
+async def require_operations_token(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> None:
+    scheme, _, token = (authorization or "").partition(" ")
+    if (
+        scheme.lower() != "bearer"
+        or not settings.operations_token
+        or not token
+        or not secrets.compare_digest(token, settings.operations_token)
+    ):
+        raise HTTPException(status_code=401, detail="Operations credentials required")
+
+
+@app.get("/health/live")
+async def liveness() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", dependencies=[Depends(require_operations_token)])
+async def readiness() -> dict[str, str]:
+    """Protected dependency readiness without topology or exception disclosure."""
+    ready = True
     try:
         from app.services.search_store import get_search_store
         from app.services.search_store.opensearch_store import OpenSearchStore
 
         store = get_search_store()
-        if isinstance(store, OpenSearchStore) and store.ping():
-            services["opensearch"] = "ok"
-        else:
-            services["opensearch"] = "unreachable"
-    except Exception as exc:
-        services["opensearch"] = f"error: {exc}"
+        ready = isinstance(store, OpenSearchStore) and await asyncio.to_thread(
+            store.ping
+        )
+    except Exception:
+        logger.exception("Readiness dependency failed")
+        ready = False
 
     try:
         from app.services.redis_client import get_redis
 
         redis = await get_redis()
-        if redis is None:
-            services["redis"] = "unreachable"
-        else:
-            pong = await redis.ping()
-            services["redis"] = "ok" if pong else "unreachable"
-    except Exception as exc:
-        services["redis"] = f"error: {exc}"
-
-    healthy = services.get("opensearch") == "ok" and services.get("redis") == "ok"
-    payload: dict = {
-        "status": "healthy" if healthy else "degraded",
-        "services": services,
-    }
-    if settings.metrics_enabled:
-        from app.observability.metrics import metrics
-
-        payload["metrics"] = metrics.snapshot()
-    return payload
+        ready = ready and redis is not None and bool(await redis.ping())
+    except Exception:
+        logger.exception("Readiness dependency failed")
+        ready = False
+    if not ready:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return {"status": "ready"}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(require_operations_token)])
 async def prometheus_metrics():
     """Prometheus text exposition of in-process FlexSearch metrics."""
     from fastapi.responses import PlainTextResponse
@@ -237,7 +235,7 @@ if __name__ == "__main__":
     # reinstall plain white formatters.
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
+        host=settings.api_host,
         port=settings.api_port,
         reload=settings.debug,
         log_config=None,

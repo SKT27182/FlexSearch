@@ -101,11 +101,19 @@ async def expand_neighbors(
 
         # Order: lower chunk_index first among neighbors before primary, then after
         before = sorted(
-            [n for n in neighbors if (n.metadata or {}).get("chunk_index", 0) < chunk_index],
+            [
+                n
+                for n in neighbors
+                if (n.metadata or {}).get("chunk_index", 0) < chunk_index
+            ],
             key=lambda r: (r.metadata or {}).get("chunk_index", 0),
         )
         after = sorted(
-            [n for n in neighbors if (n.metadata or {}).get("chunk_index", 0) > chunk_index],
+            [
+                n
+                for n in neighbors
+                if (n.metadata or {}).get("chunk_index", 0) > chunk_index
+            ],
             key=lambda r: (r.metadata or {}).get("chunk_index", 0),
         )
         expanded.extend(before)

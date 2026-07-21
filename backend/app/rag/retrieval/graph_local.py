@@ -46,7 +46,15 @@ class GraphLocalRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
+        if self._graph_backend == "microsoft":
+            return await self._delegate.retrieve(
+                query,
+                project_id,
+                top_k=top_k,
+                rag_generation=rag_generation,
+            )
         return await self._delegate.retrieve(query, project_id, top_k=top_k)
 
 

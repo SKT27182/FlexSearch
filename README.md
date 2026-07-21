@@ -192,8 +192,8 @@ make up                 # docker compose up -d --build
 | `make dev-local` | uvicorn reload + celery worker + Vite |
 | `make worker-local` | Celery only |
 | `make up` / `make dev` | Docker app stack on `infra-network` |
+| `make db-bootstrap` | Create the app database if absent, migrate, and verify revision `009` |
 | `make db-migrate` | `alembic upgrade head` |
-| `make db-stamp` | Stamp Alembic head without SQL (schema already via `init_db`) |
 | `make test` | Backend pytest |
 | `make eval` | Golden-set eval harness |
 
@@ -204,8 +204,9 @@ Open **http://localhost:5144** — register/login, create a project, ingest docu
 ```bash
 curl -s http://127.0.0.1:9200 | head
 redis-cli -h 127.0.0.1 -p 63791 -a "$REDIS_PASSWORD" ping
-curl -s http://127.0.0.1:8889/health
-curl -s http://127.0.0.1:8889/metrics | head   # if METRICS_ENABLED
+curl -s http://127.0.0.1:8889/health/live
+curl -s -H "Authorization: Bearer $OPERATIONS_TOKEN" http://127.0.0.1:8889/health/ready
+curl -s -H "Authorization: Bearer $OPERATIONS_TOKEN" http://127.0.0.1:8889/metrics | head
 make eval
 ```
 
@@ -470,7 +471,7 @@ Strategy-pattern ingest and retrieval: LangChain-backed chunking, extraction, em
 
 #### [Auth & ACL](backend/docs/auth/README.md)
 
-Roles, infra-hub vs local login, JWT claims vs DB authorization, FastAPI dependencies, and owner-only project ACL versus `/api/admin/*`. Covers chat session and job SSE authorization, OpenAPI Basic auth caveats for infra-linked accounts, and known gaps (no refresh tokens, admin create `name` issues).
+Roles, infra-hub vs local login, short-lived access-only JWTs, token-version revocation, FastAPI dependencies, and owner-only project ACL versus `/api/admin/*`. Covers chat-session and job-SSE authorization and the INFRA_ADMIN/ADMIN hierarchy.
 
 #### [Data model](backend/docs/data-model/README.md)
 
@@ -486,7 +487,7 @@ Per-project `ChatConfig` stages that wrap `RAGPipeline.retrieve()` without forki
 
 #### [Neo4j / Graph RAG](backend/docs/neo4j-graph-rag/README.md)
 
-Graph mode end-to-end for Neo4j (incremental per-document entity graphs) and Microsoft GraphRAG (project-level MinIO workspace, local/global search). Covers indexing pipelines, retrieval matrix, config, Neo4j labels, ops reconcile/kill switches, and remaining gaps (unused `max_context_tokens`, Neo4j “global” = passage fulltext, process-local `_in_flight`).
+Graph mode end-to-end for Neo4j (transactional per-document replacement) and Microsoft GraphRAG (generation-scoped MinIO workspaces, local/global search). Covers distributed Redis leases, database fencing generations, retrieval, reconciliation, and cleanup.
 
 #### [OpenSearch / SearchStore](backend/docs/opensearch/README.md)
 
@@ -494,15 +495,15 @@ Sole vector + lexical store for vector projects: index mapping, `SearchStore` pr
 
 #### [Celery](backend/docs/celery/README.md)
 
-App-owned workers (no Beat): queues `ingest`, `graph`, `summary`, `default`; task IDs and coalesce/replace rules; document status + SSE; crawl/bulk fan-out into ingest. Ops-focused failure table (stuck `stored`, revoked task discard, eager mode in prod) and scaling tips for splitting queues.
+App-owned workers plus a dedicated Beat scheduler: queues `ingest`, `graph`, `summary`, `default`; transactional-outbox dispatch, generation fencing, document status + SSE, and crawl/bulk fan-out into ingest.
 
 #### [Website crawler](backend/docs/crawler/README.md)
 
-BFS same-domain crawl with robots, optional sitemap seed, SSRF guards, and markdown extraction into the shared ingest path. Documents API (`POST .../crawl`), job SSE, Celery `default` queue, env defaults, and gaps (sitemap index recursion, DNS TOCTOU, no cancel API).
+BFS same-domain crawl with robots, optional sitemap seed, DNS-pinned SSRF-safe HTTP, bounded responses, defused sitemap XML, and markdown extraction into the shared ingest path.
 
 #### [Bulk `.ragpack`](backend/docs/bulk/README.md)
 
-ZIP import/export with `manifest.json` (`file` / `text` / `url` refs), zip-slip-safe extract, Celery import + sync export of COMPLETED docs. Same shared ingest fan-out as crawl; notes MIME allowlist differences vs upload API and synchronous export blocking the API process.
+Bounded `.ragpack` import/export with `manifest.json` (`file` / `text` / `url` refs), archive-bomb/traversal checks, SSRF-safe remote documents, and outbox-driven Celery import.
 
 #### [Hierarchical summaries](backend/docs/summaries/README.md)
 
@@ -518,7 +519,7 @@ Offline golden-set harness for retrieval@k and lexical faithfulness — CI-safe 
 
 #### [Ops](backend/docs/ops/README.md)
 
-Production ops view: `/metrics` and `/health`, rate-limit env matrix, logging, worker topology, SSRF/ACL checklist, load smoke script, and links to [runbooks](backend/docs/ops/runbooks.md) (empty retrieval, Celery backlog, OpenSearch down, stuck graph, summary COMPLETED-with-error, etc.).
+Production ops view: public `/health/live`, protected `/health/ready` and `/metrics`, rate-limit matrix, logging, worker topology, SSRF/ACL checklist, and incident runbooks.
 
 ### Related root docs
 
@@ -551,16 +552,16 @@ Typical flow: create project (pick vector or graph) → configure RAG → ingest
 
 | Concern | Where |
 |---------|--------|
-| **Health** | `GET /health` — OpenSearch + Redis; `healthy` only if both ok; optional metrics snapshot. Does **not** check Postgres or Neo4j. |
-| **Metrics** | `GET /metrics` when `METRICS_ENABLED` — process-local Prometheus text (chat, retrieval, stages, LLM, ingest, rate limits). Bind privately. |
-| **Workers** | One process/container consuming `ingest,graph,summary,default` (concurrency 2). No Celery Beat. Split queues if OCR starves graph/crawl. |
+| **Health** | Public `GET /health/live` is process-only; protected `GET /health/ready` checks dependencies without returning raw exceptions. |
+| **Metrics** | Protected `GET /metrics` emits Prometheus text. Send `Authorization: Bearer $OPERATIONS_TOKEN`. |
+| **Workers** | Worker queues consume `ingest,graph,summary,default`; a dedicated Beat scheduler dispatches the transactional outbox. |
 | **Rate limits** | Chat 60/min, crawl/bulk 10/min, suggestions 30/min (defaults); Redis sliding window with in-process fallback. |
 | **SSE** | Document/project progress + crawl/bulk job events; Redis down → DB poll fallback for documents. |
 | **Eval** | `make eval` — offline CI gate, not live RAG quality. |
 | **Load smoke** | `python backend/scripts/load_smoke.py --endpoint health\|chat …` |
 | **Incidents** | [`backend/docs/ops/runbooks.md`](backend/docs/ops/runbooks.md) |
 
-Compose healthcheck curls `http://localhost:8889/health`. Worker image includes Tesseract/Poppler for OCR/PDF.
+Compose healthcheck curls `http://localhost:8889/health/live`. Worker image includes Tesseract/Poppler for OCR/PDF.
 
 ---
 
@@ -571,14 +572,14 @@ These are documented in domain guides; do not treat UI knobs as guarantees witho
 | Area | Limitation | Detail |
 |------|------------|--------|
 | OpenSearch | BM25 `k1`/`b` unused; hybrid RRF is two client queries | [opensearch](backend/docs/opensearch/README.md) |
-| Graph | Neo4j “global” is passage fulltext (not communities); `max_context_tokens` unused; `_in_flight` process-local across workers | [neo4j-graph-rag](backend/docs/neo4j-graph-rag/README.md) |
+| Graph | Neo4j “global” is passage fulltext rather than Microsoft-style community reports | [neo4j-graph-rag](backend/docs/neo4j-graph-rag/README.md) |
 | Chat stages | Multihop silently wins over multi-query; `optimization.enabled` always runs keyword optimize | [query-stages](backend/docs/query-stages/README.md) |
 | Summaries | Failure leaves doc `COMPLETED` with `summary:` error; graph skips entirely | [summaries](backend/docs/summaries/README.md) |
-| Crawl / bulk | SSRF DNS TOCTOU; no cancel API; export sync on API; bulk MIME looser than upload | [crawler](backend/docs/crawler/README.md), [bulk](backend/docs/bulk/README.md) |
+| Crawl / bulk | Crawl and archive limits are deliberately strict; exports still run synchronously | [crawler](backend/docs/crawler/README.md), [bulk](backend/docs/bulk/README.md) |
 | Suggestions | Follow-ups use vector OpenSearch context on graph projects | [suggestions](backend/docs/suggestions/README.md) |
 | Eval | Offline mocks only — no live `--project-id` path | [eval](backend/docs/eval/README.md) |
-| Auth | No refresh/denylist; JWT `role` claim not used for ACL | [auth](backend/docs/auth/README.md) |
-| Upload | Docling supports Office MIME types the upload allowlist does not | [RAG module](backend/app/rag/README.md) |
+| Auth | Access-token-only sessions deliberately end on reload; account security changes revoke tokens | [auth](backend/docs/auth/README.md) |
+| Upload | Office and spreadsheet formats are intentionally unsupported in this release | [deployment](docs/deployment.md) |
 
 ---
 

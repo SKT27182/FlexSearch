@@ -34,6 +34,8 @@ CHAT_RULE = "chat"
 CRAWL_RULE = "crawl"
 BULK_RULE = "bulk"
 SENSITIVE_RULE = "sensitive"
+LOGIN_RULE = "login"
+REGISTER_RULE = "register"
 
 
 def _rule_from_settings(name: str) -> RateLimitRule:
@@ -54,6 +56,14 @@ def _rule_from_settings(name: str) -> RateLimitRule:
             name=name,
             limit=settings.rate_limit_bulk_per_minute,
             window_seconds=60,
+        )
+    if name == LOGIN_RULE:
+        return RateLimitRule(
+            name=name, limit=settings.rate_limit_login_per_minute, window_seconds=60
+        )
+    if name == REGISTER_RULE:
+        return RateLimitRule(
+            name=name, limit=settings.rate_limit_register_per_minute, window_seconds=60
         )
     return RateLimitRule(
         name=name,
@@ -78,6 +88,10 @@ class _MemoryWindow:
                 return False
             q.append(now)
             return True
+
+    def clear(self) -> None:
+        with self._lock:
+            self._hits.clear()
 
 
 _memory = _MemoryWindow()

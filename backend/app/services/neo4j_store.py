@@ -233,6 +233,135 @@ class Neo4jStore:
                 name=name,
             )
 
+    def replace_document_graph(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        filename: str,
+        generation: int,
+        passages: list[PassageRecord],
+        entities: list[EntityRecord],
+        mentions: list[tuple[str, str]],
+        relations: list[RelationRecord],
+        embeddings: dict[str, list[float]],
+    ) -> bool:
+        """Fence and replace one document graph in a single Neo4j transaction."""
+
+        def replace(tx) -> bool:
+            fence = tx.run(
+                """
+                MERGE (proj:Project {project_id: $project_id})
+                WITH proj
+                WHERE $generation >= coalesce(proj.rag_generation, 0)
+                SET proj.rag_generation = $generation
+                RETURN proj.project_id AS project_id
+                """,
+                project_id=project_id,
+                generation=generation,
+            ).single()
+            if fence is None:
+                return False
+            tx.run(
+                """
+                OPTIONAL MATCH (old:Document {project_id: $project_id})
+                WHERE old.logical_document_id = $document_id
+                   OR old.document_id = $document_id
+                OPTIONAL MATCH (old)<-[:FROM_DOCUMENT]-(p:Passage)
+                WITH old, collect(DISTINCT p) AS passages
+                FOREACH (node IN passages | DETACH DELETE node)
+                FOREACH (node IN CASE WHEN old IS NULL THEN [] ELSE [old] END |
+                  DETACH DELETE node)
+                WITH 1 AS keep_row
+                OPTIONAL MATCH (e:Entity {project_id: $project_id})
+                WHERE NOT ()-[:MENTIONS]->(e)
+                WITH collect(DISTINCT e) AS orphaned
+                FOREACH (node IN orphaned | DETACH DELETE node)
+                """,
+                project_id=project_id,
+                document_id=document_id,
+            ).consume()
+            document_key = f"{document_id}:g{generation}"
+            tx.run(
+                """
+                MATCH (proj:Project {project_id: $project_id})
+                CREATE (d:Document {
+                  document_id: $document_key,
+                  logical_document_id: $document_id,
+                  project_id: $project_id,
+                  filename: $filename,
+                  rag_generation: $generation
+                })
+                CREATE (d)-[:IN_PROJECT]->(proj)
+                """,
+                project_id=project_id,
+                document_id=document_id,
+                document_key=document_key,
+                filename=filename,
+                generation=generation,
+            ).consume()
+            tx.run(
+                """
+                MATCH (d:Document {document_id: $document_key})
+                UNWIND $passages AS row
+                CREATE (p:Passage {
+                  passage_id: row.passage_id,
+                  document_id: row.document_id,
+                  project_id: $project_id,
+                  content: row.content,
+                  chunk_index: row.chunk_index,
+                  filename: row.filename,
+                  rag_generation: $generation
+                })
+                CREATE (p)-[:FROM_DOCUMENT]->(d)
+                """,
+                project_id=project_id,
+                document_key=document_key,
+                generation=generation,
+                passages=[vars(p) for p in passages],
+            ).consume()
+            tx.run(
+                """
+                UNWIND $entities AS row
+                MERGE (e:Entity {entity_id: row.entity_id})
+                SET e.name = row.name,
+                    e.type = row.type,
+                    e.description = row.description,
+                    e.project_id = $project_id,
+                    e.embedding = row.embedding
+                """,
+                project_id=project_id,
+                entities=[
+                    {**vars(entity), "embedding": embeddings.get(entity.entity_id)}
+                    for entity in entities
+                ],
+            ).consume()
+            tx.run(
+                """
+                UNWIND $mentions AS row
+                MATCH (p:Passage {passage_id: row.passage_id, project_id: $project_id})
+                MATCH (e:Entity {entity_id: row.entity_id, project_id: $project_id})
+                MERGE (p)-[:MENTIONS]->(e)
+                """,
+                project_id=project_id,
+                mentions=[{"passage_id": p, "entity_id": e} for p, e in mentions],
+            ).consume()
+            tx.run(
+                """
+                UNWIND $relations AS row
+                MATCH (a:Entity {entity_id: row.source_entity_id, project_id: $project_id})
+                MATCH (b:Entity {entity_id: row.target_entity_id, project_id: $project_id})
+                MERGE (a)-[r:RELATES_TO {type: row.type}]->(b)
+                SET r.description = row.description
+                """,
+                project_id=project_id,
+                relations=[vars(relation) for relation in relations],
+            ).consume()
+            return True
+
+        with self._get_driver().session() as session:
+            return bool(session.execute_write(replace))
+
     def upsert_document(
         self,
         project_id: str,
@@ -365,16 +494,17 @@ class Neo4jStore:
         with self._get_driver().session() as session:
             session.run(
                 """
-                MATCH (d:Document {document_id: $document_id, project_id: $project_id})
+                MATCH (d:Document {project_id: $project_id})
+                WHERE d.logical_document_id = $document_id
+                   OR d.document_id = $document_id
                 OPTIONAL MATCH (d)<-[:FROM_DOCUMENT]-(p:Passage)
-                OPTIONAL MATCH (p)-[:MENTIONS]->(e:Entity)
-                WITH collect(DISTINCT p) AS passages, collect(DISTINCT e) AS entities, d
+                WITH collect(DISTINCT p) AS passages, d
                 FOREACH (n IN passages | DETACH DELETE n)
-                WITH entities, d
-                UNWIND entities AS ent
-                WITH ent, d
+                WITH d
+                OPTIONAL MATCH (ent:Entity {project_id: $project_id})
                 WHERE NOT ()-[:MENTIONS]->(ent)
-                DETACH DELETE ent
+                WITH collect(DISTINCT ent) AS orphaned_entities, d
+                FOREACH (ent IN orphaned_entities | DETACH DELETE ent)
                 DETACH DELETE d
                 """,
                 project_id=project_id,

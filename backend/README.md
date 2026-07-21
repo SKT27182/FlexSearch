@@ -192,8 +192,8 @@ make up                 # docker compose up -d --build
 | `make dev-local` | uvicorn reload + celery `-Q ingest,graph,summary,default` + frontend |
 | `make worker-local` | Celery worker only |
 | `make up` / `make dev` | Docker app stack |
+| `make db-bootstrap` | Create the app database if absent, migrate, and verify revision `009` |
 | `make db-migrate` | `alembic upgrade head` |
-| `make db-stamp` | Stamp Alembic head without SQL |
 | `make test` | Backend pytest |
 | `make eval` | Golden-set eval harness |
 
@@ -217,7 +217,8 @@ Smoke:
 ```bash
 curl -s http://127.0.0.1:9200 | head
 redis-cli -h 127.0.0.1 -p 63791 -a "$REDIS_PASSWORD" ping
-curl -s http://127.0.0.1:8889/health
+curl -s http://127.0.0.1:8889/health/live
+curl -s -H "Authorization: Bearer $OPERATIONS_TOKEN" http://127.0.0.1:8889/health/ready
 ```
 
 ---
@@ -226,24 +227,24 @@ curl -s http://127.0.0.1:8889/health
 
 **Module:** `app/main.py`
 
-On startup (**lifespan**), the app prepares dependencies before serving traffic: ensure Postgres tables exist, Neo4j schema is present, and interrupted graph jobs are reconciled. On shutdown it closes Redis and DB pools cleanly.
+On startup (**lifespan**), the app verifies that PostgreSQL is already at the exact Alembic revision and reconciles interrupted graph jobs. It performs no CREATE, ALTER, DROP, or Neo4j schema mutation. On shutdown it closes Redis and DB pools cleanly.
 
 | Concern | Behavior |
 |---------|----------|
-| Lifespan | `init_db()` → Neo4j `ensure_schema()` → `reconcile_interrupted_graph_indexes()`; shutdown `close_redis()` / `close_db()` |
+| Lifespan | exact Alembic revision check → `reconcile_interrupted_graph_indexes()`; shutdown `close_redis()` / `close_db()` |
 | Middleware | **Only** `CORSMiddleware` (`settings.cors_origins_list`) |
 | Auth | Per-route `Depends(get_current_*)` — no global auth middleware |
 | Rate limits | Explicit `check_rate_limit(...)` on sensitive routes — not middleware |
 | Logging | `setup_unified_logging` + third-party bridge at import; uvicorn `log_config=None` when run as `__main__` |
 | Docs | OpenAPI/Swagger disabled at defaults; served at `/api/docs` + `/api/openapi.json` behind HTTP Basic |
 
-**Why no global auth middleware?** Routes choose their own dependency (`get_current_user`, admin-only helpers, or public health). That keeps `/health` and login open while protecting project APIs. **CORS** is the only cross-cutting middleware so browsers on the frontend origin can call the API with credentials/headers as configured.
+**Why no global auth middleware?** Routes choose their own dependency. Only `/health/live`, login, and registration are public; readiness and metrics require the operations bearer token. **CORS** is restricted by the validated production origin list.
 
 **Lifespan in plain language:** before the first request, “make sure the filing cabinets exist” (tables/schema) and “mark stuck graph rebuilds honestly” (reconcile). On stop, close pooled connections so Redis/Postgres do not leak clients across reloads.
 
 Routers mounted under `/api`: `auth`, `projects`, `documents`, `website`, `bulk`, `jobs`, `retrieval`, `chat`, `rag`, `admin`.
 
-Root routes: `GET /`, `GET /health`, `GET /metrics` (if enabled).
+Root routes: `GET /`, `GET /health/live`, protected `GET /health/ready`, and protected `GET /metrics`.
 
 ---
 
@@ -385,14 +386,7 @@ Entities: **User → Project → Document**; **ChatSession → ChatTurn** (proje
 
 Enums: `UserRole`, `RagMode` (`vector`|`graph`), `DocumentStatus` (ingest pipeline), graph index status in JSON.
 
-**Dual schema paths:**
-
-1. **Startup `init_db()`** — `create_all` + ad-hoc ALTER helpers (hierarchy, name, rag_config, document columns). Convenient for local/dev bring-up.
-2. **Alembic** `001`…`008` — including `rag_mode` and chat tables. Versioned, reviewable changes for shared/prod environments.
-
-Prefer `make db-migrate` in shared environments; use `make db-stamp` when schema already matches via `init_db` (marks Alembic “at head” without re-running SQL).
-
-**Why both?** Early iterations used `init_db()` for speed; Alembic is the durable migration history. Stamp when the live schema already matches so you do not double-apply columns.
+**Single schema path:** Alembic migrations are forward-only and must be run before API or workers start. Revision `009` adds token revocation, RAG generations/transitions, previous-generation cleanup metadata, and the transactional outbox. Runtime credentials should not have schema-mutation privileges, and startup refuses any revision mismatch.
 
 **Ownership mental model:** a project belongs to one user (owner). Documents belong to a project. Chat sessions belong to `(project, user)` — two users never share a session row even on the same project (normal routes are owner-only anyway). Deleting a project cascades ORM children and also wipes index/object-store data via lifecycle helpers (see below).
 
@@ -494,9 +488,10 @@ Key: `user:{id}` when authenticated, else client IP (`X-Forwarded-For` first hop
 
 | Endpoint | Behavior |
 |----------|----------|
-| `GET /health` | Pings OpenSearch + Redis. `status` is `healthy` only if **both** are `ok`; else `degraded`. Optionally embeds `metrics.snapshot()` when `METRICS_ENABLED`. **Does not** check Postgres or Neo4j. |
-| `GET /metrics` | Prometheus text exposition; `404` if metrics disabled |
-| Compose healthcheck | `curl -f http://localhost:8889/health` |
+| `GET /health/live` | Public process-only liveness; contains no dependency topology or exception text |
+| `GET /health/ready` | Operations-token-protected dependency readiness |
+| `GET /metrics` | Operations-token-protected Prometheus exposition |
+| Compose healthcheck | `curl -f http://localhost:8889/health/live` |
 
 In-process counters live in `app/observability/metrics.py` (retrieval, chat, rate-limit hits, …). Stage timings use `app/observability/tracing.py` hooks into the same registry — **not** distributed OpenTelemetry traces. Counters are per process (scrape the API for chat/retrieval; worker processes hold their own ingest counters).
 
@@ -506,7 +501,7 @@ In-process counters live in `app/observability/metrics.py` (retrieval, chat, rat
 
 ## Celery queues overview
 
-App: `app/celery_app.py`. **No Celery Beat** — all work is on-demand (nothing runs on a crontab).
+App: `app/celery_app.py`. A dedicated Celery Beat scheduler dispatches pending transactional-outbox events; workers consume application queues.
 
 Queues isolate workloads so a long GraphRAG rebuild does not starve document ingest, and summary jobs stay off the critical ingest path.
 
@@ -564,7 +559,7 @@ Same upload → extract → chat wrapper; different index + retrieve strategies.
 
 1. **`graph_backend` in retrieve:** `RAGPipeline.retrieve` passes `GraphEffectiveRagConfig` (includes `graph_backend`) into `build_graph_retrieval_strategy`. Bare `GraphRetrievalConfig` still defaults to neo4j.
 2. **`wipe_neo4j_graph`:** calls `delete_project_subgraph` (aligned with `Neo4jStore`).
-3. **MS rebuild lock:** Celery task holds `_in_flight` and calls `build_index_for_project(..., manage_in_flight=False)` to avoid same-process no-op skip. `_in_flight` remains process-local across workers.
+3. **MS rebuild lock:** Celery acquires a renewable Redis lease keyed by project and uses the database RAG generation as its fencing token. A worker that loses the lease or becomes stale cannot publish the generation.
 
 Pipeline delete helpers for graph mode always use Neo4j subgraph APIs (not MS workspace wipe) — project delete/mode-switch should go through `wipe_index_for_mode` instead. See [neo4j-graph-rag](docs/neo4j-graph-rag/README.md) §10 for remaining gaps (`max_context_tokens`, Neo4j “global” semantics).
 

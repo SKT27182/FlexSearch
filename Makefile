@@ -25,6 +25,7 @@ BACKEND_PID := $(LOG_DIR)/backend.pid
 FRONTEND_PID := $(LOG_DIR)/frontend.pid
 WORKER_PID := $(LOG_DIR)/worker.pid
 WORKER_LOG := $(LOG_DIR)/worker.log
+CELERY_BEAT_DB := $(DATA_DIR)/celerybeat-schedule.db
 # DEV_LOG_MODE: file | console | both (default)
 DEV_LOG_MODE ?= both
 BACKEND_ENV_FILE := $(if $(wildcard backend/.env),backend/.env,backend/.env.example)
@@ -89,14 +90,16 @@ dev-local: install prepare-logs ## Run backend + frontend + Celery worker locall
 		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-$(BACKEND_PORT)}" --app-dir backend \
 		) & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
 		( setup_log_pipe "$(WORKER_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
-		  cd backend && .venv/bin/celery -A app.celery_app worker --loglevel=INFO \
+		  cd backend && .venv/bin/celery -A app.celery_app worker --beat --loglevel=INFO \
+		    --schedule="$(CELERY_BEAT_DB)" \
 		    -Q ingest,graph,summary,default --pool="$(CELERY_POOL)" --concurrency="$(CELERY_CONCURRENCY)" \
 		) & worker_pid=$$!; echo $$worker_pid > "$(WORKER_PID)"; \
 		( setup_log_pipe "$(FRONTEND_LOG)"; cd frontend && pnpm run dev ) & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
 		wait $$backend_pid $$frontend_pid $$worker_pid'
 
-worker-local: ## Run Celery worker only (queues: ingest,graph,summary,default)
-	cd backend && .venv/bin/celery -A app.celery_app worker --loglevel=INFO \
+worker-local: ## Run Celery worker and local outbox scheduler
+	cd backend && .venv/bin/celery -A app.celery_app worker --beat --loglevel=INFO \
+		--schedule="$(CELERY_BEAT_DB)" \
 		-Q ingest,graph,summary,default --pool="$(CELERY_POOL)" --concurrency="$(CELERY_CONCURRENCY)"
 
 up: ## Start app containers in Docker
@@ -202,9 +205,6 @@ format: ## Format backend code
 
 db-migrate: ## Run database migrations (idempotent; safe on existing DBs)
 	cd backend && .venv/bin/alembic -c alembic.ini upgrade head
-
-db-stamp: ## Mark DB as migrated without running SQL (schema already current via init_db)
-	cd backend && .venv/bin/alembic -c alembic.ini stamp head
 
 db-revision: ## Create new migration
 	@read -p "Migration message: " msg; \

@@ -37,17 +37,7 @@ def upgrade() -> None:
         sa.Column("extracted_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    # Migrate status values to new pipeline (varchar-backed enum in app)
-    op.execute(
-        """
-        UPDATE documents SET status = 'uploaded' WHERE status::text = 'pending';
-        """
-    )
-    op.execute(
-        """
-        UPDATE documents SET status = 'extracting' WHERE status::text = 'processing';
-        """
-    )
+    # Convert the legacy PostgreSQL enum before introducing new values.
     op.alter_column(
         "documents",
         "status",
@@ -60,6 +50,16 @@ def upgrade() -> None:
             name="documentstatus",
         ),
         postgresql_using="status::text",
+    )
+    op.execute(
+        """
+        UPDATE documents SET status = 'uploaded' WHERE status = 'pending';
+        """
+    )
+    op.execute(
+        """
+        UPDATE documents SET status = 'extracting' WHERE status = 'processing';
+        """
     )
 
 

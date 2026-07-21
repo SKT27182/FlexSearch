@@ -31,6 +31,7 @@ from app.rag.chat.types import (
     ChatTurnMemory,
     build_citations,
     format_passages,
+    validate_answer_citations,
 )
 from app.rag.pipeline import create_pipeline
 from app.rag.retrieval.base import RetrievalResult
@@ -69,14 +70,25 @@ class ChatOrchestrator:
         self.rag_config: VectorRagConfig | GraphRagConfig = parse_rag_config(
             rag_mode, project.rag_config
         )
-        self.chat_config: ChatConfig = getattr(self.rag_config, "chat", None) or ChatConfig()
+        self.chat_config: ChatConfig = (
+            getattr(self.rag_config, "chat", None) or ChatConfig()
+        )
         self.memory = memory or SessionMemoryService()
         self.llm = get_llm_service()
 
     async def _load_history(
-        self, session_id: UUID | None
+        self,
+        session_id: UUID | None,
+        *,
+        session_user_id: UUID | None,
+        session_project_id: UUID | None,
     ) -> list[ChatTurnMemory]:
-        if not session_id or not self.chat_config.include_history:
+        if (
+            not session_id
+            or session_user_id is None
+            or session_project_id is None
+            or not self.chat_config.include_history
+        ):
             return []
         if not self.chat_config.memory.enabled:
             return []
@@ -87,7 +99,10 @@ class ChatOrchestrator:
         # Hydrate from Postgres when Redis misses (Phase 1 review note)
         if not turns:
             db_turns = await ChatHistoryService(self.db).turns_as_memory(
-                session_id, max_turns=max_turns
+                session_id,
+                user_id=session_user_id,
+                project_id=session_project_id,
+                max_turns=max_turns,
             )
             if db_turns:
                 await self.memory.replace_turns(
@@ -124,7 +139,11 @@ class ChatOrchestrator:
         top_k: int,
         overrides: RetrievalOverrides | None,
     ) -> tuple[list[RetrievalResult], str, str]:
-        pipeline = create_pipeline(self.rag_config, rag_mode=self.rag_mode)
+        pipeline = create_pipeline(
+            self.rag_config,
+            rag_mode=self.rag_mode,
+            rag_generation=self.project.rag_generation,
+        )
         return await pipeline.retrieve(
             query=query,
             project_id=str(self.project.id),
@@ -154,9 +173,7 @@ class ChatOrchestrator:
             if clarifying:
                 return question, clarifying
 
-        if opt.enabled and opt.rewrite and (
-            history or self.chat_config.memory.enabled
-        ):
+        if opt.enabled and opt.rewrite and (history or self.chat_config.memory.enabled):
             timer.start("rewrite")
             query = await rewrite_query(self.llm, query, history)
             timer.end("rewrite", rewritten=query != question)
@@ -320,12 +337,18 @@ class ChatOrchestrator:
         question: str,
         *,
         session_id: UUID | None = None,
+        session_user_id: UUID | None = None,
+        session_project_id: UUID | None = None,
         top_k: int | None = None,
         overrides: RetrievalOverrides | None = None,
     ) -> ChatAnswer:
         start = time.time()
         timer = StageTimer(enabled=True)
-        history = await self._load_history(session_id)
+        history = await self._load_history(
+            session_id,
+            session_user_id=session_user_id,
+            session_project_id=session_project_id,
+        )
         effective_top_k = top_k or self.chat_config.top_k
         debug_payload = None
 
@@ -352,6 +375,7 @@ class ChatOrchestrator:
             query, top_k=effective_top_k, overrides=overrides, timer=timer
         )
         citations = build_citations(results)
+        self._record_injection_signals(citations)
         empty = len(citations) == 0
 
         if empty:
@@ -384,11 +408,14 @@ class ChatOrchestrator:
             max_tokens=self.chat_config.max_tokens,
         )
         timer.end("generate", model=response.model)
+        validated_answer, invalid_citations, grounded = validate_answer_citations(
+            response.content, citations
+        )
 
         if self.chat_config.debug:
             debug_payload = timer.summary()
         answer = ChatAnswer(
-            answer=response.content,
+            answer=validated_answer,
             citations=citations,
             retrieval_strategy=retrieval_name,
             reranking_strategy=rerank_name,
@@ -398,6 +425,8 @@ class ChatOrchestrator:
             output_tokens=response.output_tokens,
             latency_ms=int((time.time() - start) * 1000),
             empty_retrieval=False,
+            grounded=grounded,
+            invalid_citations=invalid_citations,
             debug=debug_payload,
         )
         self._record_metrics("query", answer)
@@ -413,6 +442,24 @@ class ChatOrchestrator:
             output_tokens=answer.output_tokens,
             rag_mode=self.rag_mode.value,
         )
+        if not answer.empty_retrieval:
+            metrics.record_rag_safety("grounded" if answer.grounded else "ungrounded")
+        metrics.record_rag_safety("invalid_citation", len(answer.invalid_citations))
+
+    @staticmethod
+    def _record_injection_signals(citations: list) -> None:
+        markers = (
+            "ignore previous",
+            "ignore all previous",
+            "system message",
+            "developer message",
+            "reveal your prompt",
+        )
+        detected = sum(
+            any(marker in citation.content.lower() for marker in markers)
+            for citation in citations
+        )
+        metrics.record_rag_safety("injection_signal", detected)
 
     def _record_stage_timings(self, timer: StageTimer) -> None:
         for event in timer.events:
@@ -427,6 +474,8 @@ class ChatOrchestrator:
         question: str,
         *,
         session_id: UUID | None = None,
+        session_user_id: UUID | None = None,
+        session_project_id: UUID | None = None,
         top_k: int | None = None,
         overrides: RetrievalOverrides | None = None,
     ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
@@ -434,7 +483,11 @@ class ChatOrchestrator:
         start = time.time()
         # Always collect stage timings for metrics; expose via SSE when debug on
         timer = StageTimer(enabled=True)
-        history = await self._load_history(session_id)
+        history = await self._load_history(
+            session_id,
+            session_user_id=session_user_id,
+            session_project_id=session_project_id,
+        )
         effective_top_k = top_k or self.chat_config.top_k
         debug_on = self.chat_config.debug
 
@@ -486,6 +539,7 @@ class ChatOrchestrator:
                     yield ("debug", event.to_dict())
 
         citations = build_citations(results)
+        self._record_injection_signals(citations)
         yield (
             "citations",
             {
@@ -541,7 +595,6 @@ class ChatOrchestrator:
                 text = chunk.get("content") or ""
                 if text:
                     full_parts.append(text)
-                    yield ("token", {"content": text})
             elif chunk.get("type") == "usage":
                 input_tokens = int(chunk.get("input_tokens") or 0)
                 output_tokens = int(chunk.get("output_tokens") or 0)
@@ -553,7 +606,12 @@ class ChatOrchestrator:
             if gen_events:
                 yield ("debug", gen_events[-1].to_dict())
 
-        answer_text = "".join(full_parts)
+        answer_text, invalid_citations, grounded = validate_answer_citations(
+            "".join(full_parts), citations
+        )
+        # Citation markers are validated before any generated text reaches the
+        # browser, so a spoofed marker never appears transiently in the stream.
+        yield ("token", {"content": answer_text})
         done_payload = {
             "answer": answer_text,
             "empty_retrieval": False,
@@ -565,6 +623,8 @@ class ChatOrchestrator:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "citations": [c.to_dict() for c in citations],
+            "grounded": grounded,
+            "invalid_citations": invalid_citations,
         }
         if debug_on:
             done_payload["debug"] = timer.summary()
@@ -577,6 +637,8 @@ class ChatOrchestrator:
             output_tokens=output_tokens,
             rag_mode=self.rag_mode.value,
         )
+        metrics.record_rag_safety("grounded" if grounded else "ungrounded")
+        metrics.record_rag_safety("invalid_citation", len(invalid_citations))
         self._record_stage_timings(timer)
         yield ("done", done_payload)
 

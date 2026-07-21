@@ -197,7 +197,8 @@ export function ProjectChatPanel({
               if (payload.stage === 'summary' && Array.isArray(payload.stages)) {
                 return payload.stages as DebugStageEvent[];
               }
-              return [...prev, payload as DebugStageEvent];
+              if (typeof payload.stage !== 'string') return prev;
+              return [...prev, payload as unknown as DebugStageEvent];
             });
           },
           onDone: (payload) => {

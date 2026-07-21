@@ -3,9 +3,13 @@ FlexSearch Backend - Chat API Tests (vector + graph)
 """
 
 import pytest
+from uuid import UUID
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+from app.db.models import Project
+from app.schemas.graph_index import GraphIndexState
 from app.rag.retrieval.base import RetrievalResult
 from app.services.llm import LLMResponse
 
@@ -25,6 +29,7 @@ async def create_user_and_login(client: AsyncClient, email: str) -> str:
 @pytest.fixture(autouse=True)
 def _disable_redis_memory(monkeypatch):
     """Avoid Redis event-loop reuse across pytest async tests."""
+
     async def _no_redis():
         return None
 
@@ -35,7 +40,9 @@ def _disable_redis_memory(monkeypatch):
 class FakeLLM:
     model_name = "fake-model"
 
-    async def complete(self, messages, temperature=0.7, max_tokens=1024, timeout_sec=120.0):
+    async def complete(
+        self, messages, temperature=0.7, max_tokens=1024, timeout_sec=120.0
+    ):
         return LLMResponse(
             content="Answer with citation [1].",
             input_tokens=10,
@@ -45,7 +52,9 @@ class FakeLLM:
             latency_ms=1,
         )
 
-    async def stream(self, messages, temperature=0.7, max_tokens=1024, timeout_sec=120.0):
+    async def stream(
+        self, messages, temperature=0.7, max_tokens=1024, timeout_sec=120.0
+    ):
         yield {"type": "token", "content": "Answer "}
         yield {"type": "token", "content": "with citation [1]."}
         yield {
@@ -106,7 +115,7 @@ class TestChatQuery:
 
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.create_pipeline",
-            lambda config=None, rag_mode=None: FakePipeline(),
+            lambda *_args, **_kwargs: FakePipeline(),
         )
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.get_llm_service",
@@ -156,7 +165,10 @@ class TestChatQuery:
                 "rag_config": {
                     "graph_backend": "neo4j",
                     "extraction": {"strategy": "ocr", "passage_chunk_size": 800},
-                    "indexing": {"max_entities_per_passage": 20, "embed_entities": True},
+                    "indexing": {
+                        "max_entities_per_passage": 20,
+                        "embed_entities": True,
+                    },
                     "retrieval": {"strategy": "graph_local", "params": {}},
                 },
             },
@@ -165,21 +177,17 @@ class TestChatQuery:
         assert project_response.status_code == 201
         project_id = project_response.json()["id"]
 
-        class FakeStats:
-            passage_count = 3
-            entity_count = 5
-
-        class FakeNeo4j:
-            def get_stats(self, project_id):
-                return FakeStats()
-
-        monkeypatch.setattr(
-            "app.api.chat.get_neo4j_store",
-            lambda: FakeNeo4j(),
+        result = await db_session.execute(
+            select(Project).where(Project.id == UUID(project_id))
         )
+        project = result.scalar_one()
+        project.graph_index_status = GraphIndexState(
+            backend="neo4j", status="ready", passage_count=3, entity_count=5
+        ).to_db()
+        await db_session.commit()
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.create_pipeline",
-            lambda config=None, rag_mode=None: FakeGraphPipeline(),
+            lambda *_args, **_kwargs: FakeGraphPipeline(),
         )
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.get_llm_service",
@@ -201,7 +209,9 @@ class TestChatQuery:
         self, async_client: AsyncClient, db_session: AsyncSession
     ) -> None:
         owner = await create_user_and_login(async_client, "chat-owner@example.com")
-        attacker = await create_user_and_login(async_client, "chat-attacker@example.com")
+        attacker = await create_user_and_login(
+            async_client, "chat-attacker@example.com"
+        )
         project_response = await async_client.post(
             "/api/projects",
             json={"name": "Private"},
@@ -214,6 +224,82 @@ class TestChatQuery:
             headers={"Authorization": f"Bearer {attacker}"},
         )
         assert response.status_code == 403
+
+    async def test_session_scope_is_checked_before_orchestration(
+        self, async_client: AsyncClient, db_session: AsyncSession, monkeypatch
+    ) -> None:
+        owner = await create_user_and_login(async_client, "session-owner@example.com")
+        attacker = await create_user_and_login(
+            async_client, "session-attacker@example.com"
+        )
+        owner_project = (
+            await async_client.post(
+                "/api/projects",
+                json={"name": "Owner corpus"},
+                headers={"Authorization": f"Bearer {owner}"},
+            )
+        ).json()["id"]
+        attacker_project = (
+            await async_client.post(
+                "/api/projects",
+                json={"name": "Attacker corpus"},
+                headers={"Authorization": f"Bearer {attacker}"},
+            )
+        ).json()["id"]
+        monkeypatch.setattr(
+            "app.rag.chat.orchestrator.create_pipeline",
+            lambda *_args, **_kwargs: FakePipeline(),
+        )
+        monkeypatch.setattr(
+            "app.rag.chat.orchestrator.get_llm_service", lambda: FakeLLM()
+        )
+        created = await async_client.post(
+            "/api/chat/query",
+            json={"project_id": owner_project, "query": "create session"},
+            headers={"Authorization": f"Bearer {owner}"},
+        )
+        session_id = created.json()["session_id"]
+
+        answer_called = False
+        stream_called = False
+
+        async def forbidden_answer(*_args, **_kwargs):
+            nonlocal answer_called
+            answer_called = True
+            raise AssertionError("orchestrator must not run")
+
+        async def forbidden_stream(*_args, **_kwargs):
+            nonlocal stream_called
+            stream_called = True
+            if False:
+                yield None
+
+        monkeypatch.setattr(
+            "app.rag.chat.orchestrator.ChatOrchestrator.answer", forbidden_answer
+        )
+        monkeypatch.setattr(
+            "app.rag.chat.orchestrator.ChatOrchestrator.stream", forbidden_stream
+        )
+        body = {
+            "project_id": attacker_project,
+            "session_id": session_id,
+            "query": "steal history",
+            "persist": False,
+        }
+        query = await async_client.post(
+            "/api/chat/query",
+            json=body,
+            headers={"Authorization": f"Bearer {attacker}"},
+        )
+        stream = await async_client.post(
+            "/api/chat/stream",
+            json=body,
+            headers={"Authorization": f"Bearer {attacker}"},
+        )
+        assert query.status_code == 404
+        assert stream.status_code == 404
+        assert answer_called is False
+        assert stream_called is False
 
     async def test_chat_stream_sse_events(
         self, async_client: AsyncClient, db_session: AsyncSession, monkeypatch
@@ -228,7 +314,7 @@ class TestChatQuery:
 
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.create_pipeline",
-            lambda config=None, rag_mode=None: FakePipeline(),
+            lambda *_args, **_kwargs: FakePipeline(),
         )
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.get_llm_service",
@@ -266,7 +352,7 @@ class TestChatQuery:
 
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.create_pipeline",
-            lambda config=None, rag_mode=None: EmptyPipeline(),
+            lambda *_args, **_kwargs: EmptyPipeline(),
         )
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.get_llm_service",
@@ -351,7 +437,7 @@ class TestChatQuery:
 
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.create_pipeline",
-            lambda config=None, rag_mode=None: CountingPipeline(),
+            lambda *_args, **_kwargs: CountingPipeline(),
         )
         monkeypatch.setattr(
             "app.rag.chat.orchestrator.get_llm_service",

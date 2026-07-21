@@ -28,6 +28,7 @@ class MicrosoftGraphGlobalRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         from app.services.graphrag_workspace import get_graphrag_workspace
 
@@ -38,6 +39,7 @@ class MicrosoftGraphGlobalRetrieval(BaseRetrievalStrategy):
             community_level=self._community_level,
             dynamic_community_selection=self._dynamic_community_selection,
             top_k=top_k,
+            generation=rag_generation or 1,
         )
         return context_to_retrieval_results(context, top_k=top_k)
 

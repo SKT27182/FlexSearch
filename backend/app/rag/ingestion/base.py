@@ -10,9 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Optional callback: (processing_step, current_page, total_pages)
-ExtractionProgressCallback = Callable[
-    [str, int | None, int | None], Awaitable[None]
-]
+ExtractionProgressCallback = Callable[[str, int | None, int | None], Awaitable[None]]
 
 
 @dataclass

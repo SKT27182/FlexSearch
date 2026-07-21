@@ -39,6 +39,7 @@ class HybridRetrieval(BaseRetrievalStrategy):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         embedding_service = get_embedding_service()
         query_vector = embedding_service.embed(query)
@@ -46,7 +47,9 @@ class HybridRetrieval(BaseRetrievalStrategy):
         hits = store.hybrid_search(
             query=query,
             query_vector=query_vector,
-            filters=filters_for_hierarchy(project_id, self._hierarchy_mode),
+            filters=filters_for_hierarchy(
+                project_id, self._hierarchy_mode, rag_generation=rag_generation
+            ),
             top_k=top_k,
             rrf_k=self._rrf_k,
         )

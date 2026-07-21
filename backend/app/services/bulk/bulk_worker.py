@@ -103,9 +103,7 @@ async def run_bulk_import_job(
                 project_id = target_project_id
                 if project_id is None:
                     if owner_user_id is None:
-                        raise ValueError(
-                            "target_project_id or owner_user_id required"
-                        )
+                        raise ValueError("target_project_id or owner_user_id required")
                     project = Project(
                         name=project_def.name,
                         description=project_def.description,
@@ -197,9 +195,7 @@ async def run_bulk_import_job(
             Path(tmp_zip).unlink(missing_ok=True)
 
 
-async def _resolve_document(
-    doc_ref, base_dir: Path
-) -> tuple[str, bytes, str]:
+async def _resolve_document(doc_ref, base_dir: Path) -> tuple[str, bytes, str]:
     if isinstance(doc_ref, UrlDocumentReference):
         from app.core.config import settings
         from app.services.url_safety import UnsafeURLError, assert_public_url
@@ -210,7 +206,9 @@ async def _resolve_document(
                 assert_public_url(url)
             except UnsafeURLError as exc:
                 raise ValueError(f"Unsafe URL in ragpack: {exc}") from exc
-        async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
+        from app.services.safe_http import SafeOutboundHttpClient
+
+        async with SafeOutboundHttpClient(timeout=60) as client:
             resp = await client.get(url)
             # Manual redirect follow with SSRF re-check
             hops = 0

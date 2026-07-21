@@ -40,9 +40,7 @@ def cancel_document_ingest(document_id: UUID) -> None:
                 task_id,
             )
         except Exception:
-            logger.debug(
-                "Could not revoke ingest task %s", task_id, exc_info=True
-            )
+            logger.debug("Could not revoke ingest task %s", task_id, exc_info=True)
 
 
 def schedule_process_document(
@@ -51,6 +49,7 @@ def schedule_process_document(
     *,
     force_full_extract: bool = False,
     mode: ReindexMode = ReindexMode.AUTO,
+    generation: int | None = None,
 ) -> str | None:
     """Enqueue process_document on the Celery `ingest` queue."""
     from app.services.celery_tasks import process_document_task
@@ -70,6 +69,7 @@ def schedule_process_document(
         kwargs={
             "force_full_extract": force_full_extract,
             "mode": mode.value,
+            "generation": generation,
         },
         task_id=task_id,
         queue="ingest",

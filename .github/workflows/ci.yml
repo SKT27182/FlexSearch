@@ -1,0 +1,113 @@
+name: major-upgrade-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+        working-directory: backend
+      - run: uv run ruff check app tests alembic
+        working-directory: backend
+      - run: uvx bandit -r app -ll
+        working-directory: backend
+      - run: uv run pytest -q
+        working-directory: backend
+      - run: uv export --locked --no-dev --format requirements-txt --output-file /tmp/requirements.txt
+        working-directory: backend
+      - run: uvx --python 3.11 pip-audit -r /tmp/requirements.txt
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.0
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm lint
+        working-directory: frontend
+      - run: pnpm build
+        working-directory: frontend
+      - run: pnpm audit --prod --audit-level high
+        working-directory: frontend
+
+  migration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: flexsearch
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: flexsearch
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U flexsearch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: test
+      POSTGRES_URL: postgresql+asyncpg://flexsearch:ci-only-password@localhost:5432/flexsearch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+        working-directory: backend
+      - run: uv run alembic upgrade head
+        working-directory: backend
+      - run: uv run alembic current | grep 009
+        working-directory: backend
+      - run: uv run alembic check
+        working-directory: backend
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker build -t flexsearch-api:ci backend
+      - run: docker build -t flexsearch-worker:ci -f backend/Dockerfile.worker backend
+      - run: docker build -t flexsearch-frontend:ci frontend
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: flexsearch-api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: flexsearch-worker:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: flexsearch-frontend:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Assert local secrets and development artifacts are absent
+        run: |
+          test -z "$(docker run --rm flexsearch-api:ci sh -c 'find /app \( -name ".env" -o -name ".env.*" -o -name "*.db" -o -name ".git" -o -name "tests" -o -name "*.log" \) -print')"
+          test -z "$(docker run --rm flexsearch-worker:ci sh -c 'find /app \( -name ".env" -o -name ".env.*" -o -name "*.db" -o -name ".git" -o -name "tests" -o -name "*.log" \) -print')"

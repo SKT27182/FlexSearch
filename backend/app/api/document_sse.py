@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import AsyncGenerator
 from uuid import UUID
 
@@ -17,9 +18,11 @@ from app.services.document_events import (
     status_payload_from_document,
 )
 from app.services.redis_client import get_redis
+from app.utils.logger import create_logger
 
 TERMINAL = {DocumentStatus.COMPLETED, DocumentStatus.FAILED}
 POLL_INTERVAL_SEC = 2.0
+logger = create_logger(__name__)
 
 
 def _format_sse(event: str, data: dict) -> str:
@@ -30,6 +33,7 @@ async def stream_document_events(
     db: AsyncSession,
     project_id: UUID,
     document_id: UUID,
+    is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncGenerator[str, None]:
     result = await db.execute(
         select(Document).where(
@@ -51,12 +55,16 @@ async def stream_document_events(
     if redis is None:
         last_fp: tuple | None = None
         while True:
+            if is_disconnected and await is_disconnected():
+                return
             await asyncio.sleep(POLL_INTERVAL_SEC)
             result = await db.execute(
-                select(Document).where(
+                select(Document)
+                .where(
                     Document.id == document_id,
                     Document.project_id == project_id,
                 )
+                .execution_options(populate_existing=True)
             )
             doc = result.scalar_one_or_none()
             if not doc:
@@ -77,16 +85,22 @@ async def stream_document_events(
     await pubsub.subscribe(channel)
     try:
         while True:
+            if is_disconnected and await is_disconnected():
+                return
             message = await pubsub.get_message(
                 ignore_subscribe_messages=True,
-                timeout=30.0,
+                timeout=15.0,
             )
             if message is None:
-                await asyncio.sleep(0.5)
+                yield ": heartbeat\n\n"
                 continue
             if message["type"] != "message":
                 continue
-            data = json.loads(message["data"])
+            try:
+                data = json.loads(message["data"])
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Ignoring malformed document status event")
+                continue
             yield _format_sse("status", data)
             if data.get("status") in ("completed", "failed"):
                 yield _format_sse("close", {"reason": "terminal"})
@@ -99,6 +113,7 @@ async def stream_document_events(
 async def stream_project_events(
     db: AsyncSession,
     project_id: UUID,
+    is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncGenerator[str, None]:
     result = await db.execute(
         select(Document)
@@ -117,9 +132,13 @@ async def stream_project_events(
     if redis is None:
         last_seen: dict[str, tuple] = {}
         while True:
+            if is_disconnected and await is_disconnected():
+                return
             await asyncio.sleep(POLL_INTERVAL_SEC)
             result = await db.execute(
-                select(Document).where(Document.project_id == project_id)
+                select(Document)
+                .where(Document.project_id == project_id)
+                .execution_options(populate_existing=True)
             )
             docs = result.scalars().all()
             for doc in docs:
@@ -144,9 +163,11 @@ async def stream_project_events(
     await pubsub.subscribe(channel)
     try:
         while True:
+            if is_disconnected and await is_disconnected():
+                return
             message = await pubsub.get_message(
                 ignore_subscribe_messages=True,
-                timeout=30.0,
+                timeout=15.0,
             )
             if message is None:
                 # Stop if no active documents left
@@ -159,11 +180,15 @@ async def stream_project_events(
                 if check.scalar_one_or_none() is None:
                     yield _format_sse("close", {"reason": "all_terminal"})
                     break
-                await asyncio.sleep(0.5)
+                yield ": heartbeat\n\n"
                 continue
             if message["type"] != "message":
                 continue
-            data = json.loads(message["data"])
+            try:
+                data = json.loads(message["data"])
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Ignoring malformed project status event")
+                continue
             yield _format_sse("status", data)
     finally:
         await pubsub.unsubscribe(channel)

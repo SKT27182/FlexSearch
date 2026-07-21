@@ -26,7 +26,7 @@ export interface ExtractionConfig {
 
 export interface ChunkingConfig {
   strategy: ChunkingStrategy;
-  params: Record<string, number | boolean | null>;
+  params: Record<string, string | number | boolean | null>;
 }
 
 export interface RetrievalConfig {
@@ -266,4 +266,20 @@ export function defaultConfigForProjectMode(mode: ProjectMode): RagConfig {
     summaries: defaultSummariesConfig(),
     chat,
   };
+}
+
+export function defaultRagConfigForMode(
+  mode: RagMode,
+  graphBackend: GraphBackend = 'neo4j'
+): RagConfig {
+  if (mode === 'graph') {
+    return defaultConfigForProjectMode(
+      graphBackend === 'microsoft' ? 'graph_microsoft' : 'graph_neo4j'
+    );
+  }
+  return defaultConfigForProjectMode('vector');
+}
+
+export function projectModeFromRag(ragMode: RagMode, config: RagConfig): ProjectMode {
+  return getProjectMode(ragMode, config);
 }

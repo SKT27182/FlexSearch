@@ -39,6 +39,7 @@ class BaseRetrievalStrategy(ABC):
         query: str,
         project_id: str,
         top_k: int = 5,
+        rag_generation: int | None = None,
     ) -> list[RetrievalResult]:
         """
         Retrieve relevant chunks for a query.
@@ -47,6 +48,7 @@ class BaseRetrievalStrategy(ABC):
             query: User query
             project_id: Project to search within
             top_k: Number of results to return
+            rag_generation: Published project generation to search
 
         Returns:
             List of RetrievalResult objects

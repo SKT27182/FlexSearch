@@ -60,10 +60,6 @@ export function MainLayout() {
     }
   }, [sidebarCollapsed])
 
-  useEffect(() => {
-    setIsSidebarOpen(false)
-  }, [location.pathname])
-
   if (!isInitialized || isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">

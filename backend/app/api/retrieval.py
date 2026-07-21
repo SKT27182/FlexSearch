@@ -16,7 +16,6 @@ from app.core.dependencies import get_current_active_user, get_db
 from app.db.models import Project, RagMode, User
 from app.rag.pipeline import create_pipeline
 from app.schemas.graph_index import GraphIndexState
-from app.schemas.project import graph_backend_for_project
 from app.schemas.rag_config import (
     GRAPH_RETRIEVAL_STRATEGIES,
     VECTOR_RETRIEVAL_STRATEGIES,
@@ -27,7 +26,7 @@ from app.schemas.retrieval import (
     RetrievalQueryRequest,
     RetrievalQueryResponse,
 )
-from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
+from app.services.neo4j_store import Neo4jStoreError
 from app.services.project_access import user_can_access_project
 from app.services.retrieval_validation import validate_retrieval_for_mode
 from app.utils.logger import create_logger
@@ -66,7 +65,9 @@ async def query_retrieval(
             detail="Invalid project ID format",
         )
 
-    result = await db.execute(select(Project).where(Project.id == project_uuid))
+    result = await db.execute(
+        select(Project).where(Project.id == project_uuid, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -91,29 +92,20 @@ async def query_retrieval(
     _validate_strategy_for_mode(rag_mode, effective_strategy)
 
     if rag_mode == RagMode.GRAPH:
-        backend = graph_backend_for_project(rag_mode, project.rag_config)
-        if backend == "microsoft":
-            graph_state = GraphIndexState.from_db(project.graph_index_status)
-            if graph_state.status != "ready":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Graph index is not ready. Wait for indexing to complete.",
-                )
-        else:
-            try:
-                stats = get_neo4j_store().get_stats(request.project_id)
-            except Neo4jStoreError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=str(exc),
-                ) from exc
-            if stats.passage_count == 0 and stats.entity_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Graph index not ready — upload and process documents first",
-                )
+        graph_state = GraphIndexState.from_db(project.graph_index_status)
+        if graph_state.status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="Graph index is not ready. Wait for indexing to complete.",
+            )
 
-    pipeline = create_pipeline(rag_config, rag_mode=rag_mode)
+    if project.rag_transition_status == "switching":
+        raise HTTPException(status_code=409, detail="RAG generation is switching")
+    pipeline = create_pipeline(
+        rag_config,
+        rag_mode=rag_mode,
+        rag_generation=project.rag_generation,
+    )
     try:
         results, retrieval_name, rerank_name = await pipeline.retrieve(
             query=request.query,

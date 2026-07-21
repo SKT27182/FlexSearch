@@ -44,9 +44,6 @@ class Neo4jGraphLocalRetrieval(BaseRetrievalStrategy):
             limit=top_k * 3,
         )
 
-        entity_scores = {
-            e["entity_id"]: float(e.get("score", 0.0)) for e in entities
-        }
         results: list[RetrievalResult] = []
         seen: set[str] = set()
         for row in passages:

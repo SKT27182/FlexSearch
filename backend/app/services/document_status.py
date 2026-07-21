@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.models import Document, DocumentStatus
-from app.services.document_events import publish_document_status, status_payload_from_document
+from app.services.document_events import (
+    publish_document_status,
+    status_payload_from_document,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)

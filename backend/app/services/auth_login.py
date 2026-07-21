@@ -5,7 +5,11 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_password_hash, verify_password
+from app.core.security import (
+    get_password_hash,
+    password_hash_needs_update,
+    verify_password,
+)
 from app.db.models import User, UserRole
 from app.services.infra_hub_users import InfraHubUser, verify_infra_hub_credentials
 from app.utils.logger import create_logger
@@ -76,5 +80,10 @@ async def authenticate_user(
     if not verify_password(password, local_user.hashed_password):
         logger.debug("Local auth failed for %s", email)
         return None
+    if password_hash_needs_update(local_user.hashed_password):
+        local_user.hashed_password = get_password_hash(password)
+        local_user.token_version += 1
+        await db.commit()
+        await db.refresh(local_user)
     logger.debug("Authenticated via FlexSearch-local for %s", email)
     return local_user

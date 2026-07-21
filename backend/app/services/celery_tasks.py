@@ -11,6 +11,14 @@ from app.utils.logger import create_logger
 logger = create_logger(__name__)
 
 
+@celery_app.task(name="app.services.celery_tasks.dispatch_outbox_task")
+def dispatch_outbox_task() -> dict:
+    from app.services.outbox import dispatch_pending_events
+
+    count = _run_async(dispatch_pending_events())
+    return {"dispatched": count}
+
+
 def _run_async(coro):
     """Run an async coroutine from a sync Celery worker process.
 
@@ -54,6 +62,7 @@ def process_document_task(
     *,
     force_full_extract: bool = False,
     mode: str = "auto",
+    generation: int | None = None,
 ) -> dict:
     """Ingest / reindex a document (vector or graph extract path)."""
     from app.services.document_worker import ReindexMode, process_document
@@ -72,12 +81,11 @@ def process_document_task(
                 UUID(project_id),
                 force_full_extract=force_full_extract,
                 mode=ReindexMode(mode),
+                generation=generation,
             )
         )
     except Exception as exc:
-        logger.exception(
-            "Celery ingest failed document=%s: %s", document_id, exc
-        )
+        logger.exception("Celery ingest failed document=%s: %s", document_id, exc)
         try:
             _run_async(
                 _mark_document_ingest_failed(
@@ -131,42 +139,66 @@ async def _mark_document_ingest_failed(
     soft_time_limit=60 * 60,
     time_limit=60 * 65,
 )
-def rebuild_graph_index_task(self, project_id: str) -> dict:
+def rebuild_graph_index_task(
+    self, project_id: str, generation: int | None = None
+) -> dict:
     """Rebuild Microsoft GraphRAG / Neo4j project graph index."""
-    from app.services.graph_index_tasks import (
-        _acquire_in_flight,
-        _mark_graph_index_failed,
-        _release_in_flight,
-    )
+    from app.services.graph_index_tasks import _mark_graph_index_failed
+    from app.services.distributed_lock import project_graph_lease
     from app.services.graphrag_workspace import get_graphrag_workspace
+    from app.db.postgres import async_session_maker
+    from app.db.models import Project
+    from sqlalchemy import select
 
     pid = UUID(project_id)
-    if not _acquire_in_flight(pid):
-        logger.info(
-            "Graph rebuild skipped; already in flight for %s", project_id
-        )
-        return {"project_id": project_id, "status": "coalesced"}
-
     logger.info(
         "Celery graph rebuild start project=%s task_id=%s",
         project_id,
         self.request.id,
     )
     try:
-        workspace = get_graphrag_workspace()
-        # Task already holds _in_flight; do not re-acquire inside workspace.
-        _run_async(
-            workspace.build_index_for_project(
-                pid, is_update=True, manage_in_flight=False
-            )
-        )
-        return {"project_id": project_id, "status": "ok"}
+
+        async def run() -> dict:
+            async with async_session_maker() as db:
+                result = await db.execute(select(Project).where(Project.id == pid))
+                project = result.scalar_one()
+                expected = generation or project.rag_generation
+                if expected != project.rag_generation:
+                    return {"project_id": project_id, "status": "stale"}
+            async with project_graph_lease(project_id, expected) as acquired:
+                if not acquired:
+                    return {"project_id": project_id, "status": "coalesced"}
+                await get_graphrag_workspace().build_index_for_project(
+                    pid,
+                    is_update=True,
+                    manage_in_flight=False,
+                    generation=expected,
+                )
+                async with async_session_maker() as db:
+                    result = await db.execute(select(Project).where(Project.id == pid))
+                    current = result.scalar_one()
+                    if current.rag_generation != expected:
+                        return {"project_id": project_id, "status": "stale"}
+                    current.rag_transition_status = "ready"
+                    current.rag_transition_error = None
+                    from app.services.outbox import add_outbox_event
+
+                    add_outbox_event(
+                        db,
+                        event_type="cleanup_previous_index",
+                        aggregate_type="project",
+                        aggregate_id=current.id,
+                        project_id=current.id,
+                        payload={"generation": expected},
+                    )
+                    await db.commit()
+                return {"project_id": project_id, "status": "ok"}
+
+        return _run_async(run())
     except Exception as exc:
         logger.error("Celery graph rebuild failed for %s: %s", project_id, exc)
         _run_async(_mark_graph_index_failed(pid, str(exc)))
         raise
-    finally:
-        _release_in_flight(pid)
 
 
 @celery_app.task(
@@ -180,6 +212,7 @@ def build_document_summaries_task(
     self,
     document_id: str,
     project_id: str,
+    generation: int,
 ) -> dict:
     """Build hierarchical summaries for a vector document (summary queue)."""
     from app.services.summary_worker import run_document_summary_job
@@ -192,13 +225,11 @@ def build_document_summaries_task(
     )
     try:
         result = _run_async(
-            run_document_summary_job(UUID(document_id), UUID(project_id))
+            run_document_summary_job(UUID(document_id), UUID(project_id), generation)
         )
         return {"document_id": document_id, "status": "ok", **(result or {})}
     except Exception as exc:
-        logger.exception(
-            "Celery summary failed document=%s: %s", document_id, exc
-        )
+        logger.exception("Celery summary failed document=%s: %s", document_id, exc)
         raise
 
 
@@ -274,9 +305,7 @@ def bulk_import_task(
         run_bulk_import_job(
             job_id,
             archive_bytes=archive_bytes,
-            target_project_id=(
-                UUID(target_project_id) if target_project_id else None
-            ),
+            target_project_id=(UUID(target_project_id) if target_project_id else None),
             owner_user_id=UUID(owner_user_id) if owner_user_id else None,
         )
     )

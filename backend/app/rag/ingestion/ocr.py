@@ -7,7 +7,6 @@ Tesseract-based OCR for text extraction from PDFs and images.
 import asyncio
 import io
 import shutil
-from typing import Any
 
 import pytesseract
 from pdf2image import convert_from_bytes
@@ -19,6 +18,7 @@ from app.rag.ingestion.base import (
     ExtractedContent,
     ExtractionProgressCallback,
 )
+from app.rag.ingestion.document_limits import validate_document_limits
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -74,6 +74,7 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
     ) -> ExtractedContent:
         """Extract text using OCR when needed."""
         logger.info("Extracting content from %s (%s)", filename, content_type)
+        validate_document_limits(content, content_type)
 
         if content_type in {"text/plain", "text/markdown"}:
             return self._extract_text(content, filename)
@@ -82,7 +83,9 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
 
             html = content.decode("utf-8", errors="replace")
             md = extract_clean_content(html) or html
-            return ExtractedContent(text=md, page_count=1, metadata={"filename": filename})
+            return ExtractedContent(
+                text=md, page_count=1, metadata={"filename": filename}
+            )
         if content_type == "application/pdf":
             if on_progress:
                 await on_progress("Extracting text from PDF…", None, None)
@@ -122,16 +125,19 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
 
                 # If page has minimal text, likely image-based - use OCR
                 if len(page_text.strip()) < 50:
-                    logger.debug(f"Page {i+1} appears image-based, using OCR")
+                    logger.debug(f"Page {i + 1} appears image-based, using OCR")
                     # Convert PDF page to image and OCR
                     page_images = convert_from_bytes(
                         content,
                         first_page=i + 1,
                         last_page=i + 1,
                         dpi=200,
+                        timeout=60,
                     )
                     if page_images:
-                        ocr_text = pytesseract.image_to_string(page_images[0])
+                        ocr_text = pytesseract.image_to_string(
+                            page_images[0], timeout=60
+                        )
                         all_text.append(ocr_text)
                         # Store image bytes if needed
                         img_bytes = io.BytesIO()
@@ -145,11 +151,20 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
             # Full OCR fallback
             all_text = []
             try:
-                pdf_images = convert_from_bytes(content, dpi=200)
-                page_count = len(pdf_images)
-                for img in pdf_images:
-                    ocr_text = pytesseract.image_to_string(img)
-                    all_text.append(ocr_text)
+                reader = PdfReader(io.BytesIO(content))
+                page_count = len(reader.pages)
+                for page_number in range(1, page_count + 1):
+                    page_images = convert_from_bytes(
+                        content,
+                        dpi=200,
+                        first_page=page_number,
+                        last_page=page_number,
+                        timeout=60,
+                    )
+                    if page_images:
+                        all_text.append(
+                            pytesseract.image_to_string(page_images[0], timeout=60)
+                        )
             except Exception:
                 logger.exception("OCR extraction failed")
                 raise
@@ -175,7 +190,7 @@ class OCRExtractionStrategy(BaseExtractionStrategy):
         image = Image.open(io.BytesIO(content))
 
         # Run OCR
-        text = pytesseract.image_to_string(image)
+        text = pytesseract.image_to_string(image, timeout=60)
 
         return ExtractedContent(
             text=text,

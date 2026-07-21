@@ -8,8 +8,6 @@ import pytest
 from app.db.models import RagMode
 from app.rag.graph.extractor import GraphExtractor, _parse_json
 from app.schemas.rag_config import (
-    GRAPH_RETRIEVAL_STRATEGIES,
-    VECTOR_RETRIEVAL_STRATEGIES,
     GraphRagConfig,
     VectorRagConfig,
     parse_rag_config,
@@ -81,7 +79,9 @@ def test_ensure_entity_vector_index_creates_when_missing() -> None:
     # SHOW INDEXES + CREATE VECTOR INDEX
     assert session.run.call_count >= 2
     create_calls = [
-        c.args[0] for c in session.run.call_args_list if c.args and "CREATE VECTOR INDEX" in c.args[0]
+        c.args[0]
+        for c in session.run.call_args_list
+        if c.args and "CREATE VECTOR INDEX" in c.args[0]
     ]
     assert create_calls
     assert "384" in create_calls[0]
@@ -101,7 +101,9 @@ def test_ensure_entity_vector_index_recreates_on_dimension_mismatch() -> None:
     stmts = [c.args[0] for c in session.run.call_args_list if c.args]
     assert any("DROP INDEX entity_embedding" in s for s in stmts)
     assert any("SET e.embedding = null" in s for s in stmts)
-    assert any("CREATE VECTOR INDEX entity_embedding" in s and "768" in s for s in stmts)
+    assert any(
+        "CREATE VECTOR INDEX entity_embedding" in s and "768" in s for s in stmts
+    )
 
 
 def test_ensure_entity_vector_index_noop_when_dim_matches() -> None:
@@ -118,4 +120,3 @@ def test_ensure_entity_vector_index_noop_when_dim_matches() -> None:
     # Only SHOW INDEXES — no drop/create
     assert session.run.call_count == 1
     assert "SHOW INDEXES" in session.run.call_args.args[0]
-

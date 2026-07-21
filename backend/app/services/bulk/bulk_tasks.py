@@ -15,10 +15,11 @@ def schedule_bulk_import(
     storage_path: str,
     target_project_id: UUID | None = None,
     owner_user_id: UUID | None = None,
+    job_id: str | None = None,
 ) -> str:
     from app.services.celery_tasks import bulk_import_task
 
-    job_id = f"bulk:{uuid4().hex[:16]}"
+    job_id = job_id or f"bulk:{uuid4().hex[:16]}"
     if target_project_id is not None:
         register_job_meta_sync(
             job_id,

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from typing import Any, TypeVar, cast
 
-from app.services.graphrag_rate_limit import is_rate_limit_error, retry_on_rate_limit_async
+from app.services.graphrag_rate_limit import (
+    is_rate_limit_error,
+    retry_on_rate_limit_async,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from uuid import NAMESPACE_DNS, uuid5
 
 from app.services.embedding import get_embedding_service
@@ -35,8 +36,10 @@ class GraphIndexer:
         self._embedding = get_embedding_service()
 
     @staticmethod
-    def passage_id(document_id: str, chunk_index: int) -> str:
-        return str(uuid5(NAMESPACE_DNS, f"{document_id}:passage:{chunk_index}"))
+    def passage_id(document_id: str, chunk_index: int, generation: int = 1) -> str:
+        return str(
+            uuid5(NAMESPACE_DNS, f"{document_id}:g{generation}:passage:{chunk_index}")
+        )
 
     @staticmethod
     def split_passages(text: str, chunk_size: int) -> list[str]:
@@ -62,34 +65,30 @@ class GraphIndexer:
         filename: str,
         text: str,
         config: GraphRagConfig,
+        generation: int = 1,
     ) -> IndexStats:
-        self._store.ensure_schema()
-        self._store.upsert_project(project_id)
-        self._store.upsert_document(project_id, document_id, filename)
-        self._store.delete_document_subgraph(project_id, document_id)
-
-        passages = self.split_passages(
-            text, config.extraction.passage_chunk_size
-        )
+        passages = self.split_passages(text, config.extraction.passage_chunk_size)
         extractor = GraphExtractor(
             max_entities=config.indexing.max_entities_per_passage
         )
 
         entity_ids_for_embed: set[str] = set()
+        entity_records: dict[str, EntityRecord] = {}
         entity_descriptions: dict[str, str] = {}
-        rel_count = 0
+        passage_records: list[PassageRecord] = []
+        mentions: list[tuple[str, str]] = []
+        relation_records: list[RelationRecord] = []
 
         for idx, passage_text in enumerate(passages):
-            pid = self.passage_id(document_id, idx)
-            self._store.upsert_passage(
-                project_id,
+            pid = self.passage_id(document_id, idx, generation)
+            passage_records.append(
                 PassageRecord(
                     passage_id=pid,
                     document_id=document_id,
                     content=passage_text,
                     chunk_index=idx,
                     filename=filename,
-                ),
+                )
             )
 
             try:
@@ -99,48 +98,58 @@ class GraphIndexer:
                 continue
 
             for entity in extracted.entities:
-                self._store.upsert_entity(
-                    project_id,
-                    EntityRecord(
-                        entity_id=entity.entity_id,
-                        name=entity.name,
-                        type=entity.type,
-                        description=entity.description,
-                    ),
+                entity_records[entity.entity_id] = EntityRecord(
+                    entity_id=entity.entity_id,
+                    name=entity.name,
+                    type=entity.type,
+                    description=entity.description,
                 )
-                self._store.link_passage_entity(
-                    project_id, pid, entity.entity_id
-                )
+                mentions.append((pid, entity.entity_id))
                 entity_ids_for_embed.add(entity.entity_id)
                 entity_descriptions[entity.entity_id] = entity.description
 
             for rel in extracted.relationships:
-                self._store.upsert_relation(
-                    project_id,
+                relation_records.append(
                     RelationRecord(
                         source_entity_id=rel.source_entity_id,
                         target_entity_id=rel.target_entity_id,
                         type=rel.type,
                         description=rel.description,
-                    ),
+                    )
                 )
-                rel_count += 1
 
+        entity_embeddings: dict[str, list[float]] = {}
         if config.indexing.embed_entities and entity_ids_for_embed:
-            texts = [
-                entity_descriptions[eid]
-                for eid in sorted(entity_ids_for_embed)
-            ]
+            texts = [entity_descriptions[eid] for eid in sorted(entity_ids_for_embed)]
             ids = sorted(entity_ids_for_embed)
             embeddings = self._embedding.embed_batch(texts)
-            self._store.set_entity_embeddings(
-                project_id,
-                dict(zip(ids, embeddings, strict=True)),
-            )
+            if len(embeddings) != len(ids):
+                raise ValueError("Entity embedding count mismatch")
+            expected_dimension = self._embedding.dimension
+            for vector in embeddings:
+                if (
+                    len(vector) != expected_dimension
+                    or not vector
+                    or not all(math.isfinite(value) for value in vector)
+                ):
+                    raise ValueError("Invalid entity embedding vector")
+            entity_embeddings = dict(zip(ids, embeddings, strict=True))
 
-        stats = self._store.get_stats(project_id)
+        applied = self._store.replace_document_graph(
+            project_id=project_id,
+            document_id=document_id,
+            filename=filename,
+            generation=generation,
+            passages=passage_records,
+            entities=list(entity_records.values()),
+            mentions=mentions,
+            relations=relation_records,
+            embeddings=entity_embeddings,
+        )
+        if not applied:
+            raise RuntimeError("Neo4j generation fence rejected a stale graph write")
         return IndexStats(
             passage_count=len(passages),
-            entity_count=stats.entity_count,
-            relationship_count=stats.relationship_count,
+            entity_count=len(entity_records),
+            relationship_count=len(relation_records),
         )

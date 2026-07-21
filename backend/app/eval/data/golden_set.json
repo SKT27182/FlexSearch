@@ -44,7 +44,7 @@
     "question": "What metrics track empty retrieval?",
     "relevant_chunk_ids": ["chunk:metrics-empty"],
     "relevant_texts": [
-      "flexsearch_chat_empty_retrieval_total counts chat turns with no retrieved context; empty_retrieval_rate is exposed on /health."
+      "flexsearch_chat_empty_retrieval_total counts chat turns with no retrieved context and is available through the protected /metrics endpoint."
     ],
     "gold_answer": "Empty retrieval is tracked by flexsearch_chat_empty_retrieval_total and the empty_retrieval_rate on health.",
     "modes": ["chunks_only"]

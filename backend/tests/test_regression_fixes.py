@@ -8,7 +8,6 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from unittest.mock import MagicMock
 
 from app.core.config import Settings
 from app.db.models import Project, RagMode
@@ -79,29 +78,6 @@ async def test_switch_graph_backend_within_graph_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token = await _login(async_client)
-    wiped: list[tuple[str, str | None]] = []
-    scheduled: list[str] = []
-
-    def _record_wipe(
-        project_id,
-        *,
-        from_mode: str,
-        graph_backend: str | None = None,
-    ) -> None:
-        wiped.append((from_mode, graph_backend))
-
-    def _record_schedule(doc_id, project_id, **kwargs) -> None:
-        scheduled.append(str(doc_id))
-
-    monkeypatch.setattr(
-        "app.api.projects.wipe_index_for_mode",
-        _record_wipe,
-    )
-    monkeypatch.setattr(
-        "app.api.projects.schedule_process_document",
-        _record_schedule,
-    )
-
     create = await async_client.post(
         "/api/projects",
         json={"name": "Graph Switch", "rag_mode": "graph"},
@@ -115,18 +91,19 @@ async def test_switch_graph_backend_within_graph_mode(
         json={"rag_mode": "graph", "graph_backend": "microsoft"},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     data = response.json()
-    assert data["documents_queued"] >= 0
-    assert "already" not in data["message"].lower()
-    assert wiped == [("graph", "neo4j")]
+    assert data["generation"] == 2
+    assert data["transition_status"] == "switching"
 
     result = await db_session.execute(
         select(Project).where(Project.id == UUID(project_id))
     )
     project = result.scalar_one()
     assert project.rag_mode == RagMode.GRAPH
-    assert graph_backend_for_project(project.rag_mode, project.rag_config) == "microsoft"
+    assert (
+        graph_backend_for_project(project.rag_mode, project.rag_config) == "microsoft"
+    )
     assert project.graph_index_status is not None
     assert project.graph_index_status.get("backend") == "microsoft"
 
@@ -136,8 +113,6 @@ async def test_switch_same_graph_backend_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token = await _login(async_client, "noop@example.com")
-    monkeypatch.setattr("app.api.projects.wipe_index_for_mode", lambda *a, **k: None)
-
     create = await async_client.post(
         "/api/projects",
         json={"name": "Graph Noop", "rag_mode": "graph"},
@@ -150,6 +125,4 @@ async def test_switch_same_graph_backend_is_noop(
         json={"rag_mode": "graph", "graph_backend": "neo4j"},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert response.status_code == 200
-    assert response.json()["documents_queued"] == 0
-    assert "already" in response.json()["message"].lower()
+    assert response.status_code == 409

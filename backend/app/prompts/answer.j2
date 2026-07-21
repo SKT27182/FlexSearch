@@ -1,15 +1,19 @@
+<untrusted_context>
 Context passages (cite with [n]):
 {% for passage in passages %}
-[{{ loop.index }}] {% if passage.filename %}({{ passage.filename }}) {% endif %}{{ passage.content }}
+<passage citation="{{ loop.index }}">{{ passage | tojson }}</passage>
 {% endfor %}
+</untrusted_context>
 
 {% if history %}
+<untrusted_history>
 Recent conversation:
 {% for turn in history %}
-{{ turn.role | capitalize }}: {{ turn.content }}
+{{ turn | tojson }}
 {% endfor %}
+</untrusted_history>
 {% endif %}
 
-User question: {{ question }}
+User question: {{ question | tojson }}
 
 Write a clear answer grounded in the context. Use [n] citations where claims come from passages.

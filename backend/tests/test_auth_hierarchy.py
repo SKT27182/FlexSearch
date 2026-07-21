@@ -12,6 +12,7 @@ from app.services.infra_hub_users import InfraHubUser
 @pytest.mark.asyncio
 async def test_authenticate_infra_hub_user_creates_linked_row():
     db = AsyncMock()
+    db.add = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     infra = InfraHubUser(
         id=1,
@@ -46,12 +47,15 @@ async def test_infra_linked_user_cannot_use_local_password():
     )
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: local))
 
-    with patch(
-        "app.services.auth_login.verify_infra_hub_credentials",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "app.services.auth_login.verify_password",
-        return_value=True,
+    with (
+        patch(
+            "app.services.auth_login.verify_infra_hub_credentials",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.auth_login.verify_password",
+            return_value=True,
+        ),
     ):
         user = await authenticate_user(db, "admin@infra.local", "secret")
 

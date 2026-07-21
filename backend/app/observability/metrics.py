@@ -105,9 +105,7 @@ class _Histogram:
                 if label_suffix:
                     # {a="b"} → {a="b",le="..."}
                     inner = label_suffix[1:-1]
-                    lines.append(
-                        f'{self.name}_bucket{{{inner},le="{le}"}} {count}'
-                    )
+                    lines.append(f'{self.name}_bucket{{{inner},le="{le}"}} {count}')
                 else:
                     lines.append(f'{self.name}_bucket{{le="{le}"}} {count}')
             lines.append(f"{self.name}_sum{label_suffix} {total_sum}")
@@ -174,6 +172,10 @@ class MetricsRegistry:
             "flexsearch_rate_limit_hits_total",
             "API rate-limit rejections",
         )
+        self.rag_safety_events = _Counter(
+            "flexsearch_rag_safety_events_total",
+            "RAG grounding, citation, and prompt-injection signals",
+        )
         self._started_at = time.time()
 
     def observe_stage(self, stage: str, seconds: float, **extra: str) -> None:
@@ -193,7 +195,9 @@ class MetricsRegistry:
         self.chat_requests.inc(path=path, rag_mode=rag_mode)
         if empty_retrieval:
             self.chat_empty_retrieval.inc(path=path, rag_mode=rag_mode)
-        self.observe_stage("chat_total", latency_ms / 1000.0, path=path, rag_mode=rag_mode)
+        self.observe_stage(
+            "chat_total", latency_ms / 1000.0, path=path, rag_mode=rag_mode
+        )
         if input_tokens:
             self.llm_tokens.inc(input_tokens, direction="input", source="chat")
         if output_tokens:
@@ -237,6 +241,10 @@ class MetricsRegistry:
         if seconds is not None:
             self.observe_stage("ingest", seconds, status=status)
 
+    def record_rag_safety(self, event: str, amount: int = 1) -> None:
+        if amount > 0:
+            self.rag_safety_events.inc(amount, event=event)
+
     def empty_retrieval_rate(self) -> float:
         """Approximate empty-retrieval rate across chat paths (0–1)."""
         with self.chat_requests.lock:
@@ -248,7 +256,7 @@ class MetricsRegistry:
         return empty / total
 
     def snapshot(self) -> dict:
-        """JSON-friendly snapshot for /health or ops dashboards."""
+        """JSON-friendly snapshot for protected operations dashboards."""
         with self.chat_requests.lock:
             chat_total = sum(self.chat_requests.values.values())
         with self.chat_empty_retrieval.lock:
@@ -277,6 +285,7 @@ class MetricsRegistry:
             self.llm_tokens,
             self.ingest_documents,
             self.rate_limit_hits,
+            self.rag_safety_events,
         )
         lines: list[str] = []
         for metric in series:

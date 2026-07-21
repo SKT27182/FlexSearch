@@ -185,7 +185,7 @@ def test_summary_schedule_replaces_when_already_started() -> None:
             return_value=True,
         ),
     ):
-        result = schedule_document_summary(document_id, project_id)
+        result = schedule_document_summary(document_id, project_id, 3)
 
     assert result == async_result.id
     mock_task.app.control.revoke.assert_called_once_with(base_id, terminate=True)
@@ -194,6 +194,7 @@ def test_summary_schedule_replaces_when_already_started() -> None:
     assert kwargs["task_id"].startswith(f"{base_id}:")
     assert kwargs["task_id"] != base_id
     assert kwargs["queue"] == "summary"
+    assert kwargs["args"] == [str(document_id), str(project_id), 3]
 
 
 def test_cancel_document_ingest_revokes_all_modes() -> None:
@@ -213,13 +214,8 @@ def test_cancel_document_ingest_revokes_all_modes() -> None:
     ):
         cancel_document_ingest(document_id)
 
-    expected_ids = {
-        f"ingest:{document_id}:{mode.value}" for mode in ReindexMode
-    }
-    revoked = {
-        call.args[0]
-        for call in mock_task.app.control.revoke.call_args_list
-    }
+    expected_ids = {f"ingest:{document_id}:{mode.value}" for mode in ReindexMode}
+    revoked = {call.args[0] for call in mock_task.app.control.revoke.call_args_list}
     assert revoked == expected_ids
     for call in mock_task.app.control.revoke.call_args_list:
         assert call.kwargs.get("terminate") is True

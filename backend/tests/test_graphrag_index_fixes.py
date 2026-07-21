@@ -37,19 +37,6 @@ def test_indexing_method_falls_back_for_unknown() -> None:
     assert gw._indexing_method_for(None) is IndexingMethod.Standard
 
 
-def test_concurrency_guard_acquires_and_releases() -> None:
-    pid = uuid4()
-    # Clean state
-    tasks._in_flight.discard(str(pid))
-    assert not tasks.is_graph_index_in_flight(pid)
-    assert tasks._acquire_in_flight(pid) is True
-    assert tasks.is_graph_index_in_flight(pid)
-    # Second acquire fails (already in flight)
-    assert tasks._acquire_in_flight(pid) is False
-    tasks._release_in_flight(pid)
-    assert not tasks.is_graph_index_in_flight(pid)
-
-
 @pytest.mark.asyncio
 async def test_reconcile_interrupted_graph_indexes_marks_indexing_as_failed(
     db_session: AsyncSession,
@@ -160,9 +147,7 @@ async def test_reconcile_leaves_non_indexing_statuses_alone(
         owner_id=uuid4(),
         rag_mode=RagMode.GRAPH,
         rag_config={"graph_backend": "microsoft"},
-        graph_index_status=GraphIndexState(
-            backend="microsoft", status="ready"
-        ).to_db(),
+        graph_index_status=GraphIndexState(backend="microsoft", status="ready").to_db(),
     )
     db_session.add(project)
     await db_session.commit()
@@ -355,9 +340,10 @@ async def test_reconcile_stale_neo4j_leaves_alive_ingest_alone(
     assert GraphIndexState.from_db(project.graph_index_status).status == "indexing"
 
 
-def test_is_graph_rebuild_alive_false_on_terminal_result(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_graph_rebuild_alive_false_on_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pid = uuid4()
-    tasks._in_flight.discard(str(pid))
 
     existing = MagicMock()
     existing.state = "FAILURE"
@@ -377,7 +363,6 @@ def test_is_graph_rebuild_alive_detects_orphaned_started(
 ) -> None:
     """STARTED in result backend but no worker owns the task → dead."""
     pid = uuid4()
-    tasks._in_flight.discard(str(pid))
 
     existing = MagicMock()
     existing.state = "STARTED"
@@ -399,16 +384,14 @@ def test_is_graph_rebuild_alive_detects_orphaned_started(
         assert tasks.is_graph_rebuild_alive(pid) is False
 
 
-def test_schedule_graph_rebuild_coalesces_received() -> None:
-    """RECEIVED is in-flight — do not enqueue a duplicate rebuild."""
+def test_schedule_graph_rebuild_replaces_orphaned_received() -> None:
     pid = uuid4()
-    task_id = tasks.graph_rebuild_task_id(pid)
-
     existing = MagicMock()
     existing.state = "RECEIVED"
 
     mock_task = MagicMock()
     mock_task.app = MagicMock()
+    mock_task.apply_async.return_value.id = "replacement"
 
     with (
         patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
@@ -416,19 +399,18 @@ def test_schedule_graph_rebuild_coalesces_received() -> None:
     ):
         result = tasks.schedule_graph_index_rebuild(pid)
 
-    assert result == task_id
-    mock_task.apply_async.assert_not_called()
+    assert result == "replacement"
+    mock_task.apply_async.assert_called_once()
 
 
-def test_schedule_graph_rebuild_coalesces_started() -> None:
+def test_schedule_graph_rebuild_replaces_orphaned_started() -> None:
     pid = uuid4()
-    task_id = tasks.graph_rebuild_task_id(pid)
-
     existing = MagicMock()
     existing.state = "STARTED"
 
     mock_task = MagicMock()
     mock_task.app = MagicMock()
+    mock_task.apply_async.return_value.id = "replacement"
 
     with (
         patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
@@ -436,8 +418,8 @@ def test_schedule_graph_rebuild_coalesces_started() -> None:
     ):
         result = tasks.schedule_graph_index_rebuild(pid)
 
-    assert result == task_id
-    mock_task.apply_async.assert_not_called()
+    assert result == "replacement"
+    mock_task.apply_async.assert_called_once()
 
 
 def test_schedule_graph_rebuild_replaces_pending() -> None:
@@ -516,7 +498,9 @@ async def test_count_non_terminal_documents(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_extractor_failfast_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_graph_extractor_failfast_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from graphrag.index.operations.extract_graph.graph_extractor import GraphExtractor
 
     from app.services import graphrag_failfast as ff

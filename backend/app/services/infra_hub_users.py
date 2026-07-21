@@ -53,7 +53,9 @@ async def get_infra_hub_user_by_email(email: str) -> InfraHubUser | None:
     )
 
 
-async def verify_infra_hub_credentials(email: str, password: str) -> InfraHubUser | None:
+async def verify_infra_hub_credentials(
+    email: str, password: str
+) -> InfraHubUser | None:
     """Authenticate any active infra-hub user against main_db (read-only).
 
     FlexSearch never stores ADMIN_EMAIL / ADMIN_PASSWORD. Every active infra-hub

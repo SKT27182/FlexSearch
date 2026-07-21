@@ -1,7 +1,5 @@
 """Project access checks for owner vs admin hierarchy."""
 
-from uuid import UUID
-
 from app.db.models import Project, User, UserRole
 
 

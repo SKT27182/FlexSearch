@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import stat
 import zipfile
 from io import BytesIO
 from pathlib import Path
+
+from app.core.config import settings
 
 from app.services.bulk.schemas import (
     BulkImportManifest,
@@ -29,10 +32,31 @@ def safe_join(base_dir: Path, relative: str) -> Path:
 
 
 def safe_extract_zip(zf: zipfile.ZipFile, extract_dir: str | Path) -> None:
-    """Extract zip members only if each stays under ``extract_dir`` (zip-slip safe)."""
+    """Extract a bounded archive after traversal, type, and bomb checks."""
     root = Path(extract_dir).resolve()
-    for info in zf.infolist():
+    entries = zf.infolist()
+    if len(entries) > settings.archive_max_entries:
+        raise ValueError("Archive contains too many entries")
+    expanded_total = 0
+    for info in entries:
         name = info.filename
+        mode = info.external_attr >> 16
+        if info.flag_bits & 0x1:
+            raise ValueError(f"Encrypted archive entry is not allowed: {name}")
+        if stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+            raise ValueError(f"Special archive entry is not allowed: {name}")
+        if Path(name).suffix.lower() in {".zip", ".ragpack"}:
+            raise ValueError(f"Nested archive is not allowed: {name}")
+        if info.file_size > settings.archive_member_max_bytes:
+            raise ValueError(f"Archive member is too large: {name}")
+        expanded_total += info.file_size
+        if expanded_total > settings.archive_expanded_max_bytes:
+            raise ValueError("Archive expanded size exceeds the configured limit")
+        if (
+            info.file_size / max(1, info.compress_size)
+            > settings.archive_max_compression_ratio
+        ):
+            raise ValueError(f"Archive member compression ratio is excessive: {name}")
         if not name or name.endswith("/"):
             # Directory entries — still validate destination.
             dest = safe_join(root, name.rstrip("/") or ".")
@@ -41,7 +65,14 @@ def safe_extract_zip(zf: zipfile.ZipFile, extract_dir: str | Path) -> None:
         dest = safe_join(root, name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(info, "r") as src, open(dest, "wb") as out:
-            out.write(src.read())
+            member_written = 0
+            while chunk := src.read(1024 * 1024):
+                member_written += len(chunk)
+                if member_written > settings.archive_member_max_bytes:
+                    raise ValueError(f"Archive member is too large: {name}")
+                out.write(chunk)
+            if member_written != info.file_size:
+                raise ValueError(f"Archive member size mismatch: {name}")
 
 
 def find_manifest_dir(extract_root: Path) -> Path:
@@ -85,8 +116,7 @@ def build_ragpack_zip(
     ``files`` is a list of (archive_path, content_bytes).
     """
     documents = [
-        {"type": "file", "path": name, "title": Path(name).stem}
-        for name, _ in files
+        {"type": "file", "path": name, "title": Path(name).stem} for name, _ in files
     ]
     manifest = {
         "version": "1.0",

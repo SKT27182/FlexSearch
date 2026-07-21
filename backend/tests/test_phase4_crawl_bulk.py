@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import zipfile
-from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -28,7 +26,9 @@ from app.services.website.crawler import (
 
 
 def test_normalise_url_strips_fragment_and_slash():
-    assert normalise_url("https://example.com/docs/#section") == "https://example.com/docs"
+    assert (
+        normalise_url("https://example.com/docs/#section") == "https://example.com/docs"
+    )
     assert normalise_url("https://example.com/") == "https://example.com/"
 
 

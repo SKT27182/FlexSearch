@@ -2,23 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, Project, RagMode
-from app.schemas.project import graph_backend_for_project
-from app.rag.pipeline import create_pipeline
-from app.schemas.rag_config import parse_rag_config
-from app.services.document_storage import extracted_md_key, extracted_meta_key
-from app.services.document_worker import get_project_rag_context
-from app.services.project_index_service import wipe_index_for_mode
-from app.services.storage import get_storage_service
-from app.services.document_tasks import cancel_document_ingest
-from app.services.summary_tasks import cancel_document_summary
-from app.utils.logger import create_logger
-
-logger = create_logger(__name__)
+from app.db.models import Document, DocumentStatus, Project
+from app.services.outbox import add_outbox_event
 
 
 async def delete_document_fully(
@@ -27,44 +17,26 @@ async def delete_document_fully(
     *,
     project_id: UUID,
 ) -> None:
-    storage = get_storage_service()
-    for path in (
-        document.storage_path,
-        document.extracted_text_path,
-        extracted_md_key(project_id, document.id),
-        extracted_meta_key(project_id, document.id),
-    ):
-        if path and storage.file_exists(path):
-            try:
-                storage.delete_file(path)
-            except Exception as exc:
-                logger.warning("Failed to delete %s: %s", path, exc)
-
-    try:
-        cancel_document_ingest(document.id)
-        cancel_document_summary(document.id)
-        rag_mode, rag_config, _ = await get_project_rag_context(db, project_id)
-        create_pipeline(rag_config, rag_mode=rag_mode).delete_document_data(
-            str(document.id), project_id=str(project_id)
-        )
-    except Exception as exc:
-        logger.warning("Failed to delete document index data: %s", exc)
-
-    await db.delete(document)
+    document.status = DocumentStatus.DELETING
+    document.processing_step = "Cleanup queued"
+    document.progress_pct = 0
+    add_outbox_event(
+        db,
+        event_type="cleanup_document",
+        aggregate_type="document",
+        aggregate_id=document.id,
+        project_id=project_id,
+        payload={},
+    )
 
 
 async def delete_project_fully(db: AsyncSession, project: Project) -> None:
-    rag_mode = project.rag_mode
-    if isinstance(rag_mode, str):
-        rag_mode = RagMode(rag_mode)
-    graph_backend = graph_backend_for_project(rag_mode, project.rag_config)
-    try:
-        wipe_index_for_mode(
-            project.id,
-            from_mode=rag_mode.value,
-            graph_backend=graph_backend if rag_mode == RagMode.GRAPH else None,
-        )
-    except Exception as exc:
-        logger.error("Failed to delete project RAG data: %s", exc)
-
-    await db.delete(project)
+    project.deleting_at = datetime.now(timezone.utc)
+    add_outbox_event(
+        db,
+        event_type="cleanup_project",
+        aggregate_type="project",
+        aggregate_id=project.id,
+        project_id=project.id,
+        payload={},
+    )

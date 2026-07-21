@@ -6,6 +6,7 @@ Main orchestrator for the RAG workflow.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 from uuid import NAMESPACE_DNS, uuid5
 
@@ -25,7 +26,6 @@ from app.schemas.rag_config import (
     EffectiveRagConfig,
     GraphEffectiveRagConfig,
     GraphRagConfig,
-    RagConfig,
     RetrievalOverrides,
     VectorRagConfig,
 )
@@ -45,9 +45,11 @@ class RAGPipeline:
         self,
         config: VectorRagConfig | GraphRagConfig,
         rag_mode: RagMode = RagMode.VECTOR,
+        rag_generation: int = 1,
     ) -> None:
         self._config = config
         self._rag_mode = rag_mode
+        self._rag_generation = rag_generation
         self._extraction = build_extraction_strategy(config.extraction)
         self._embedding = get_embedding_service()
         self._search_store = get_search_store()
@@ -65,6 +67,10 @@ class RAGPipeline:
     @property
     def rag_mode(self) -> RagMode:
         return self._rag_mode
+
+    @property
+    def rag_generation(self) -> int:
+        return self._rag_generation
 
     async def extract_document(
         self,
@@ -101,7 +107,10 @@ class RAGPipeline:
             },
         )
         # Hierarchy metadata (heading breadcrumbs) when enabled
-        if isinstance(self._config, VectorRagConfig) and self._config.extraction.extract_hierarchy:
+        if (
+            isinstance(self._config, VectorRagConfig)
+            and self._config.extraction.extract_hierarchy
+        ):
             from app.rag.ingestion.hierarchy import annotate_chunks_with_hierarchy
 
             annotate_chunks_with_hierarchy(text, chunks)
@@ -120,8 +129,22 @@ class RAGPipeline:
             return 0
         chunk_texts = [chunk.content for chunk in chunks]
         embeddings = self._embedding.embed_batch(chunk_texts)
+        if len(embeddings) != len(chunks):
+            raise ValueError(
+                "Embedding provider returned "
+                f"{len(embeddings)} vectors for {len(chunks)} chunks"
+            )
+        expected_dimension = self._embedding.dimension
+        for index, vector in enumerate(embeddings):
+            if len(vector) != expected_dimension:
+                raise ValueError(
+                    f"Embedding {index} has dimension {len(vector)}; "
+                    f"expected {expected_dimension}"
+                )
+            if not vector or not all(math.isfinite(value) for value in vector):
+                raise ValueError(f"Embedding {index} contains invalid values")
         documents: list[SearchDocument] = []
-        for chunk, embedding in zip(chunks, embeddings):
+        for chunk, embedding in zip(chunks, embeddings, strict=True):
             meta = dict(chunk.metadata)
             chunk_type = meta.pop("chunk_type", None)
             parent_chunk_id = meta.pop("parent_chunk_id", None)
@@ -129,11 +152,19 @@ class RAGPipeline:
             # Parents are stored under their stable parent_chunk_id so children
             # can resolve them via get_by_ids(parent_id).
             if chunk_type == "parent" and parent_chunk_id:
-                doc_id = parent_chunk_id
+                doc_id = f"{parent_chunk_id}:g{self._rag_generation}"
             else:
                 doc_id = str(
-                    uuid5(NAMESPACE_DNS, f"{document_id}_{chunk.chunk_index}")
+                    uuid5(
+                        NAMESPACE_DNS,
+                        f"{document_id}_{self._rag_generation}_{chunk.chunk_index}",
+                    )
                 )
+            indexed_parent_id = (
+                f"{chunk.parent_id}:g{self._rag_generation}"
+                if chunk.parent_id
+                else None
+            )
             documents.append(
                 SearchDocument(
                     id=doc_id,
@@ -141,9 +172,12 @@ class RAGPipeline:
                     content=chunk.content,
                     project_id=project_id,
                     document_id=document_id,
+                    rag_generation=self._rag_generation,
+                    embedding_model=self._embedding.model_name,
+                    embedding_dimension=expected_dimension,
                     chunk_index=chunk.chunk_index,
                     chunk_type=chunk_type,
-                    parent_id=chunk.parent_id,
+                    parent_id=indexed_parent_id,
                     summary_level="chunk",
                     filename=filename,
                     start_char=chunk.start_char,
@@ -151,8 +185,12 @@ class RAGPipeline:
                     extra=meta,
                 )
             )
-        self._search_store.upsert(documents)
-        return len(chunks)
+        acknowledged = self._search_store.upsert(documents)
+        if acknowledged != len(documents):
+            raise ValueError(
+                f"Search store acknowledged {acknowledged!r} of {len(documents)} chunks"
+            )
+        return acknowledged
 
     async def ingest_from_text(
         self,
@@ -188,6 +226,7 @@ class RAGPipeline:
                 query=query,
                 project_id=project_id,
                 top_k=k,
+                rag_generation=self._rag_generation,
             )
             metrics.record_retrieval(
                 strategy=retrieval.name,
@@ -216,6 +255,7 @@ class RAGPipeline:
             query=query,
             project_id=project_id,
             top_k=k * 2,
+            rag_generation=self._rag_generation,
         )
         reranked = await reranking.rerank(query=query, results=results, top_k=k)
         metrics.record_retrieval(
@@ -259,7 +299,9 @@ class RAGPipeline:
             self._search_store.delete_by_project(project_id)
             logger.info("Deleted OpenSearch data for project: %s", project_id)
 
-    def delete_document_data(self, document_id: str, project_id: str | None = None) -> None:
+    def delete_document_data(
+        self, document_id: str, project_id: str | None = None
+    ) -> None:
         if self._rag_mode == RagMode.GRAPH:
             if not project_id:
                 logger.warning(
@@ -277,8 +319,9 @@ class RAGPipeline:
 def create_pipeline(
     config: VectorRagConfig | GraphRagConfig,
     rag_mode: RagMode = RagMode.VECTOR,
+    rag_generation: int = 1,
 ) -> RAGPipeline:
-    return RAGPipeline(config, rag_mode=rag_mode)
+    return RAGPipeline(config, rag_mode=rag_mode, rag_generation=rag_generation)
 
 
 def get_rag_pipeline(

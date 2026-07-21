@@ -20,7 +20,7 @@ services:
     networks:
       - infra-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8889/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8889/health/live"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -40,6 +40,25 @@ services:
       REDIS_PORT: "6379"
       CELERY_QUEUES: ingest,graph,summary,default
       CELERY_CONCURRENCY: "2"
+    networks:
+      - infra-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: flexsearch-scheduler
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=INFO"]
+    env_file:
+      - backend/.env
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     networks:
       - infra-network
     depends_on:

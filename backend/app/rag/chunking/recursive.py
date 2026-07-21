@@ -146,8 +146,8 @@ class RecursiveChunking(BaseChunkingStrategy):
             docs = self._splitter.create_documents([segment])
             for doc in docs:
                 if "start_index" in (doc.metadata or {}):
-                    doc.metadata["start_index"] = (
-                        abs_offset + int(doc.metadata["start_index"])
+                    doc.metadata["start_index"] = abs_offset + int(
+                        doc.metadata["start_index"]
                     )
             prose_chunks = documents_to_chunks(
                 docs,

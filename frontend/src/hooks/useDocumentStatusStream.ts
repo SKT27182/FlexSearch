@@ -1,13 +1,13 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import type { DocumentStatusEvent } from '@/lib/rag-types';
 import { documentId } from '@/lib/document-state';
-import { documentsApi } from '@/lib/api';
+import { documentsApi, getAccessToken } from '@/lib/api';
 
 const API_BASE = '/api';
 const POLL_MS = 2000;
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('access_token');
+  const token = getAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

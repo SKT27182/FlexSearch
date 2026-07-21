@@ -39,7 +39,6 @@ Form data: `username`, `password`
 // Response (200)
 {
   "access_token": "eyJ...",
-  "refresh_token": "eyJ...",
   "token_type": "bearer"
 }
 ```

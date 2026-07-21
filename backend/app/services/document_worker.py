@@ -32,8 +32,12 @@ from app.services.document_storage import (
     meta_to_bytes,
 )
 from app.services.neo4j_store import Neo4jStoreError, get_neo4j_store
+from app.services.outbox import add_outbox_event
 from app.services.storage import get_storage_service
-from app.services.summary_tasks import schedule_document_summary, cancel_document_summary
+from app.services.summary_tasks import (
+    schedule_document_summary,
+    cancel_document_summary,
+)
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -46,6 +50,61 @@ class DocumentIngestError(Exception):
 
     Raised so Celery marks the task as FAILURE instead of returning success.
     """
+
+
+class StaleRagGeneration(Exception):
+    """A worker belongs to a project generation that is no longer current."""
+
+
+async def _assert_current_generation(
+    db: AsyncSession, project: Project, expected_generation: int
+) -> None:
+    await db.refresh(project, attribute_names=["rag_generation"])
+    if project.rag_generation != expected_generation:
+        raise StaleRagGeneration
+
+
+async def _reconcile_transition(
+    db: AsyncSession, project: Project, expected_generation: int
+) -> None:
+    await db.refresh(project)
+    if (
+        project.rag_generation != expected_generation
+        or project.rag_transition_status != "switching"
+    ):
+        return
+    config = parse_rag_config(project.rag_mode, project.rag_config)
+    if isinstance(config, GraphRagConfig) and config.graph_backend == "microsoft":
+        return
+    result = await db.execute(
+        select(Document.status).where(Document.project_id == project.id)
+    )
+    statuses = list(result.scalars().all())
+    if any(
+        status not in {DocumentStatus.COMPLETED, DocumentStatus.FAILED}
+        for status in statuses
+    ):
+        return
+    project.rag_transition_status = (
+        "failed"
+        if any(status == DocumentStatus.FAILED for status in statuses)
+        else "ready"
+    )
+    project.rag_transition_error = (
+        "One or more documents failed during the generation rebuild"
+        if project.rag_transition_status == "failed"
+        else None
+    )
+    if project.rag_transition_status == "ready":
+        add_outbox_event(
+            db,
+            event_type="cleanup_previous_index",
+            aggregate_type="project",
+            aggregate_id=project.id,
+            project_id=project.id,
+            payload={"generation": expected_generation},
+        )
+    await db.commit()
 
 
 class ReindexMode(str, Enum):
@@ -91,7 +150,9 @@ async def _update_graph_index_status(
         "passage_count": stats.passage_count,
         "error": error,
         "fingerprint": (
-            parse_rag_config(project.rag_mode, project.rag_config).ingestion_fingerprint()
+            parse_rag_config(
+                project.rag_mode, project.rag_config
+            ).ingestion_fingerprint()
             if project.rag_config
             else None
         ),
@@ -136,7 +197,7 @@ async def _handle_graph_after_extract(
             "All documents ready for project %s; scheduling graph rebuild",
             project.id,
         )
-        schedule_graph_index_rebuild(project.id)
+        schedule_graph_index_rebuild(project.id, generation=project.rag_generation)
         return
     await _run_graph_index(
         db,
@@ -150,9 +211,7 @@ async def _handle_graph_after_extract(
     )
 
 
-async def _count_non_terminal_documents(
-    db: AsyncSession, project_id: UUID
-) -> int:
+async def _count_non_terminal_documents(db: AsyncSession, project_id: UUID) -> int:
     """Count documents not yet COMPLETED or FAILED (still being processed)."""
     from sqlalchemy import func
 
@@ -210,6 +269,7 @@ async def process_document(
     *,
     force_full_extract: bool = False,
     mode: ReindexMode = ReindexMode.AUTO,
+    generation: int | None = None,
 ) -> None:
     import time
 
@@ -228,7 +288,17 @@ async def process_document(
             raise DocumentIngestError(f"Document not found: {document_id}")
 
         rag_mode, rag_config, project = await get_project_rag_context(db, project_id)
-        pipeline = create_pipeline(rag_config, rag_mode=rag_mode)
+        expected_generation = generation or project.rag_generation
+        if expected_generation != project.rag_generation:
+            logger.info(
+                "Ignoring stale ingest project=%s generation=%s", project_id, generation
+            )
+            return
+        pipeline = create_pipeline(
+            rag_config,
+            rag_mode=rag_mode,
+            rag_generation=expected_generation,
+        )
         storage = get_storage_service()
         ext_hash = extraction_fingerprint(rag_config.extraction)
 
@@ -256,7 +326,9 @@ async def process_document(
                 if not document.extracted_text_path or not storage.file_exists(
                     document.extracted_text_path
                 ):
-                    raise ValueError("No extracted.md available for from_extracted mode")
+                    raise ValueError(
+                        "No extracted.md available for from_extracted mode"
+                    )
                 can_skip_extract = True
             elif mode == ReindexMode.AUTO and not force_full_extract:
                 if (
@@ -267,6 +339,7 @@ async def process_document(
                     can_skip_extract = True
 
             if can_skip_extract:
+                await _assert_current_generation(db, project, expected_generation)
                 if rag_mode == RagMode.GRAPH:
                     assert isinstance(rag_config, GraphRagConfig)
                     await _handle_graph_after_extract(
@@ -276,6 +349,7 @@ async def process_document(
                     await _run_chunk_and_index(
                         db, document, pipeline, storage, rag_config, ext_hash
                     )
+                await _reconcile_transition(db, project, expected_generation)
                 return
 
             await update_document_status(
@@ -288,9 +362,7 @@ async def process_document(
             )
 
             if not storage.file_exists(document.storage_path):
-                raise FileNotFoundError(
-                    f"Raw file missing: {document.storage_path}"
-                )
+                raise FileNotFoundError(f"Raw file missing: {document.storage_path}")
 
             raw = storage.download_file(document.storage_path)
 
@@ -326,16 +398,16 @@ async def process_document(
                     progress_pct=0,
                     error_message="No text could be extracted from this file",
                 )
-                raise DocumentIngestError(
-                    "No text could be extracted from this file"
-                )
+                raise DocumentIngestError("No text could be extracted from this file")
 
             # Post-extract preprocess (ftfy / whitespace / headers)
             preprocess_cfg = getattr(rag_config.extraction, "preprocess", None)
             if preprocess_cfg is None or preprocess_cfg.enabled:
                 extracted.text = preprocess_extracted_text(
                     extracted.text,
-                    fix_encoding=True if preprocess_cfg is None else preprocess_cfg.fix_encoding,
+                    fix_encoding=True
+                    if preprocess_cfg is None
+                    else preprocess_cfg.fix_encoding,
                     normalize_ws=(
                         True
                         if preprocess_cfg is None
@@ -383,6 +455,7 @@ async def process_document(
                 extracted_at=datetime.now(timezone.utc),
             )
 
+            await _assert_current_generation(db, project, expected_generation)
             if rag_mode == RagMode.GRAPH:
                 assert isinstance(rag_config, GraphRagConfig)
                 await _handle_graph_after_extract(
@@ -406,7 +479,15 @@ async def process_document(
                     extracted.text,
                     extracted.page_count,
                 )
+            await _reconcile_transition(db, project, expected_generation)
 
+        except StaleRagGeneration:
+            logger.info(
+                "Stopped stale ingest document=%s generation=%s",
+                document_id,
+                expected_generation,
+            )
+            return
         except Neo4jStoreError as exc:
             logger.exception("Neo4j error processing document %s", document_id)
             await _safe_fail_document(
@@ -471,9 +552,7 @@ async def _run_chunk_and_index(
     # and so schedule_document_summary at the end is not blocked.
     cancel_document_summary(document.id)
 
-    pipeline.delete_document_data(
-        str(document.id), project_id=str(document.project_id)
-    )
+    pipeline.delete_document_data(str(document.id), project_id=str(document.project_id))
 
     if text is None:
         path = document.extracted_text_path or extracted_md_key(
@@ -518,7 +597,9 @@ async def _run_chunk_and_index(
 
     # Hierarchical summaries (vector only; skip if disabled)
     if isinstance(rag_config, VectorRagConfig) and rag_config.summaries.enabled:
-        schedule_document_summary(document.id, document.project_id)
+        schedule_document_summary(
+            document.id, document.project_id, pipeline.rag_generation
+        )
 
 
 async def _run_graph_index(
@@ -557,6 +638,7 @@ async def _run_graph_index(
         document.filename,
         text,
         rag_config,
+        generation=project.rag_generation,
     )
 
     await _update_graph_index_status(db, project, status="ready")

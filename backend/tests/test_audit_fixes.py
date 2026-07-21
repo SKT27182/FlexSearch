@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import pytest
 
@@ -51,72 +51,85 @@ async def test_pipeline_retrieve_passes_microsoft_graph_backend(
         captured.append(config)
         return _FakeRetriever()
 
-    monkeypatch.setattr(
-        "app.rag.pipeline.build_graph_retrieval_strategy", _fake_build
-    )
+    monkeypatch.setattr("app.rag.pipeline.build_graph_retrieval_strategy", _fake_build)
     await pipeline.retrieve("what is X?", "proj-1", top_k=3)
 
     assert len(captured) == 1
     assert getattr(captured[0], "graph_backend") == "microsoft"
 
 
-def test_celery_rebuild_passes_manage_in_flight_false(
+@pytest.mark.asyncio
+async def test_distributed_graph_lease_coalesces_and_releases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Celery holds _in_flight; workspace must not re-acquire (would no-op)."""
-    from app.services import celery_tasks as ct
-    from app.services import graph_index_tasks as tasks
+    from app.services.distributed_lock import project_graph_lease
 
-    pid = uuid4()
-    tasks._in_flight.discard(str(pid))
+    class FakeRedis:
+        value = None
 
-    build_kwargs: dict = {}
+        async def set(self, _key, value, *, nx, px):
+            if nx and self.value is not None:
+                return False
+            self.value = value
+            return True
 
-    class _WS:
-        async def build_index_for_project(self, project_id, **kwargs):
-            build_kwargs.update(kwargs)
-            build_kwargs["project_id"] = project_id
+        async def eval(self, script, _count, _key, token, *args):
+            if self.value != token:
+                return 0
+            if "del" in script:
+                self.value = None
+            return 1
 
-    def _run(coro):
-        # Sync Celery path: drive the coroutine without asyncio.run (pytest loop).
-        try:
-            coro.send(None)
-        except StopIteration as stop:
-            return stop.value
-        raise AssertionError("coroutine did not complete")
+    redis = FakeRedis()
 
-    monkeypatch.setattr(
-        "app.services.graphrag_workspace.get_graphrag_workspace",
-        lambda: _WS(),
-    )
-    monkeypatch.setattr(ct, "_run_async", _run)
+    async def get_fake_redis():
+        return redis
 
-    result = ct.rebuild_graph_index_task.run(str(pid))
-
-    assert result["status"] == "ok"
-    assert build_kwargs.get("manage_in_flight") is False
-    assert build_kwargs.get("is_update") is True
-    assert not tasks.is_graph_index_in_flight(pid)
+    monkeypatch.setattr("app.services.distributed_lock.get_redis", get_fake_redis)
+    async with project_graph_lease("project", 4, ttl_ms=60_000) as acquired:
+        assert acquired is True
+        async with project_graph_lease("project", 4, ttl_ms=60_000) as duplicate:
+            assert duplicate is False
+    async with project_graph_lease("project", 4, ttl_ms=60_000) as reacquired:
+        assert reacquired is True
 
 
 @pytest.mark.asyncio
 async def test_workspace_skips_when_in_flight_and_managing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.services import graph_index_tasks as tasks
-    from app.services.graphrag_workspace import GraphRAGWorkspace
+    from app.services.distributed_lock import project_graph_lease
 
-    pid = uuid4()
-    tasks._in_flight.discard(str(pid))
-    assert tasks._acquire_in_flight(pid) is True
+    async def no_redis():
+        return None
 
-    monkeypatch.setattr(
-        "app.services.graphrag_workspace.settings.graph_indexing_enabled", True
-    )
-    ws = GraphRAGWorkspace.__new__(GraphRAGWorkspace)
-    # Should return immediately without touching DB
-    await ws.build_index_for_project(pid, manage_in_flight=True)
-    tasks._release_in_flight(pid)
+    monkeypatch.setattr("app.services.distributed_lock.get_redis", no_redis)
+    with pytest.raises(RuntimeError, match="Redis is required"):
+        async with project_graph_lease("project", 1):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_distributed_graph_lease_cancels_owner_when_renewal_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.distributed_lock import project_graph_lease
+
+    class LostLeaseRedis:
+        async def set(self, *_args, **_kwargs):
+            return True
+
+        async def eval(self, script, *_args):
+            return 1 if "del" in script else 0
+
+    async def get_fake_redis():
+        return LostLeaseRedis()
+
+    monkeypatch.setattr("app.services.distributed_lock.get_redis", get_fake_redis)
+    with pytest.raises(asyncio.CancelledError, match="lease was lost"):
+        async with project_graph_lease("project", 1, ttl_ms=30) as acquired:
+            assert acquired is True
+            await asyncio.sleep(0.1)
 
 
 @pytest.mark.asyncio
@@ -157,12 +170,8 @@ async def test_multihop_xor_multi_query_precedence(
             "none",
         )
 
-    monkeypatch.setattr(
-        "app.rag.chat.orchestrator.analyze_and_decompose", _analyze
-    )
-    monkeypatch.setattr(
-        "app.rag.chat.orchestrator.generate_multi_queries", _multi
-    )
+    monkeypatch.setattr("app.rag.chat.orchestrator.analyze_and_decompose", _analyze)
+    monkeypatch.setattr("app.rag.chat.orchestrator.generate_multi_queries", _multi)
     orch._pipeline_retrieve = _retrieve  # type: ignore[method-assign]
     orch._graph_aware_overrides = lambda o: o  # type: ignore[method-assign]
 

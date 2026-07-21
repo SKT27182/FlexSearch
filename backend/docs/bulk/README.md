@@ -490,11 +490,11 @@ Programmatic build: `build_ragpack_zip(project_name=..., description=..., files=
 
 ## Limitations / gaps
 
-1. **No upload / archive size cap** — entire file read into memory at API and again in the worker.
+1. **Strict archive limits** — compressed size, expanded size, members, member size, nesting, encryption, special files, and compression ratio are rejected at fixed ceilings.
 2. **Export is synchronous** — large corpora can block the API process; no Celery export job.
-3. **`TEXT_INGEST_TYPES` unused** — bulk does not validate MIME against the frozenset in `text_document.py`; upload API allowlist is separate and stricter.
+3. **One supported-format registry** — direct and bulk imports use the same backend-owned extension, MIME, and content-signature policy.
 4. **Multi-project manifest + single target** — API import dumps every document into the path `project_id` with no warning that other manifest projects are collapsed.
-5. **SSRF DNS TOCTOU** on URL refs — same as crawl (`assert_public_url` then separate `httpx` resolve).
+5. **Public-only URL references** — DNS results and redirect targets are validated and connection-pinned; internal URLs are intentionally rejected.
 6. **URL refs ignore robots / rate limits** — only SSRF + redirect hop limit.
 7. **Extension-only accept** — `.zip` with non-zip content fails later in the worker, not at the API.
 8. **No import cancel API** — long imports cannot be revoked from the product API.

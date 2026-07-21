@@ -17,7 +17,10 @@ from app.services.litellm_config import (
     graphrag_embedding_endpoint,
     vector_embedding_endpoint,
 )
-from litellm import aembedding, embedding  # after litellm_config installs AWS-preload filter
+from litellm import (
+    aembedding,
+    embedding,
+)  # after litellm_config installs AWS-preload filter
 
 from app.services.model_ids import extract_litellm_provider, is_local_embedding_model
 from app.utils.logger import create_logger
@@ -47,8 +50,10 @@ class EmbeddingService:
     ) -> None:
         configure_litellm()
         self._model = model_id or settings.embedding_model
-        self._api_key = api_key if api_key is not None else (
-            settings.embedding_api_key or settings.api_key
+        self._api_key = (
+            api_key
+            if api_key is not None
+            else (settings.embedding_api_key or settings.api_key)
         )
         self._api_base = api_base
         self._provider = extract_litellm_provider(self._model)

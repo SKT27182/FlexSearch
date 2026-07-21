@@ -37,6 +37,7 @@ def cancel_document_summary(document_id: UUID) -> None:
 def schedule_document_summary(
     document_id: UUID,
     project_id: UUID,
+    generation: int,
 ) -> str | None:
     """Enqueue hierarchical summary build for a vector document.
 
@@ -54,7 +55,7 @@ def schedule_document_summary(
     task_id = f"{base_id}:{uuid4().hex[:8]}"
 
     async_result = build_document_summaries_task.apply_async(
-        args=[str(document_id), str(project_id)],
+        args=[str(document_id), str(project_id), generation],
         task_id=task_id,
         queue="summary",
     )

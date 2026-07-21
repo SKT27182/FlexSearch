@@ -4,37 +4,36 @@ FlexSearch Backend - Documents API Router
 Document upload and management endpoints.
 """
 
+import asyncio
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.document_sse import stream_document_events, stream_project_events
 from app.core.dependencies import get_current_active_user, get_db
+from app.core.config import settings
 from app.db.models import Document, DocumentStatus, Project, User
 from app.schemas.document import (
     DocumentContentResponse,
     DocumentListResponse,
     DocumentResponse,
 )
-from app.services.document_status import update_document_status
 from app.services.document_storage import (
     extracted_md_key,
-    extracted_meta_key,
     raw_object_key,
 )
 from app.services.document_tasks import (
-    cancel_document_ingest,
     schedule_process_document,
 )
 from app.services.project_access import user_can_access_project
 from app.services.storage import get_storage_service
-from app.rag.pipeline import create_pipeline
-from app.services.document_worker import ReindexMode, get_project_rag_context
-from app.services.summary_tasks import cancel_document_summary
+from app.services.upload_validation import spool_upload, validate_supported_upload
+from app.services.outbox import add_outbox_event
+from app.services.document_worker import ReindexMode
 from app.utils.logger import create_logger
 
 logger = create_logger(__name__)
@@ -56,7 +55,9 @@ async def verify_project_access(
     current_user: User,
     db: AsyncSession,
 ) -> Project:
-    result = await db.execute(select(Project).where(Project.id == project_id))
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.deleting_at.is_(None))
+    )
     project = result.scalar_one_or_none()
 
     if not project:
@@ -86,35 +87,48 @@ async def upload_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DocumentResponse:
     """Upload a document; processing runs in the background."""
-    await verify_project_access(project_id, current_user, db)
-
-    allowed_types = {
-        "application/pdf",
-        "text/plain",
-        "text/markdown",
-        "text/html",
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-    }
-
-    if file.content_type not in allowed_types:
+    project = await verify_project_access(project_id, current_user, db)
+    active_result = await db.execute(
+        select(func.count(Document.id))
+        .join(Project, Document.project_id == Project.id)
+        .where(Project.owner_id == project.owner_id)
+        .where(
+            Document.status.not_in(
+                {
+                    DocumentStatus.COMPLETED,
+                    DocumentStatus.FAILED,
+                    DocumentStatus.DELETING,
+                }
+            )
+        )
+    )
+    if int(active_result.scalar_one()) >= 2:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type {file.content_type} not supported",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="At most two ingestion jobs may be active per user",
         )
 
-    content = await file.read()
-    file_size = len(content)
     filename = file.filename or "untitled"
+    upload_stream, file_size, prefix = await spool_upload(
+        file, max_bytes=settings.direct_upload_max_bytes
+    )
+    try:
+        content_type = validate_supported_upload(
+            filename=filename,
+            declared_content_type=file.content_type,
+            prefix=prefix,
+        )
+    except Exception:
+        upload_stream.close()
+        raise
 
     document = Document(
         project_id=project_id,
         filename=filename,
-        content_type=file.content_type or "application/octet-stream",
+        content_type=content_type,
         storage_path="",
         file_size=file_size,
-        status=DocumentStatus.UPLOADED,
+        status=DocumentStatus.PENDING_STORAGE,
         processing_step="Upload received",
         progress_pct=10,
     )
@@ -123,25 +137,41 @@ async def upload_document(
 
     storage_path = raw_object_key(project_id, document.id, filename)
     document.storage_path = storage_path
-    await db.commit()
-    await db.refresh(document)
-
     storage = get_storage_service()
-    storage.upload_file(
-        path=storage_path,
-        data=content,
-        content_type=document.content_type,
-    )
-
-    await update_document_status(
-        db,
-        document,
-        status=DocumentStatus.STORED,
-        processing_step="Saved to storage",
-        progress_pct=25,
-    )
-
-    schedule_process_document(document.id, project_id)
+    temporary_path = f"tmp/uploads/{project_id}/{document.id}"
+    try:
+        await asyncio.to_thread(
+            storage.upload_stream,
+            temporary_path,
+            upload_stream,
+            file_size,
+            document.content_type,
+        )
+        add_outbox_event(
+            db,
+            event_type="finalize_upload",
+            aggregate_type="document",
+            aggregate_id=document.id,
+            project_id=project_id,
+            payload={
+                "temporary_path": temporary_path,
+                "final_path": storage_path,
+                "generation": project.rag_generation,
+            },
+        )
+        await db.commit()
+        await db.refresh(document)
+    except Exception:
+        await db.rollback()
+        try:
+            await asyncio.to_thread(storage.delete_file, temporary_path)
+        except Exception:
+            logger.warning(
+                "Could not remove failed temporary upload %s", temporary_path
+            )
+        raise
+    finally:
+        upload_stream.close()
 
     return DocumentResponse.model_validate(document)
 
@@ -182,13 +212,16 @@ async def list_documents(
 @router.get("/events")
 async def project_document_events(
     project_id: UUID,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     await verify_project_access(project_id, current_user, db)
 
     async def event_generator():
-        async for chunk in stream_project_events(db, project_id):
+        async for chunk in stream_project_events(
+            db, project_id, request.is_disconnected
+        ):
             yield chunk
 
     return StreamingResponse(
@@ -232,13 +265,16 @@ async def get_document(
 async def document_events(
     project_id: UUID,
     document_id: UUID,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     await verify_project_access(project_id, current_user, db)
 
     async def event_generator():
-        async for chunk in stream_document_events(db, project_id, document_id):
+        async for chunk in stream_document_events(
+            db, project_id, document_id, request.is_disconnected
+        ):
             yield chunk
 
     return StreamingResponse(
@@ -342,30 +378,15 @@ async def delete_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    storage = get_storage_service()
-    for path in (
-        document.storage_path,
-        document.extracted_text_path,
-        extracted_md_key(project_id, document_id),
-        extracted_meta_key(project_id, document_id),
-    ):
-        if path and storage.file_exists(path):
-            try:
-                storage.delete_file(path)
-            except Exception as e:
-                logger.error("Failed to delete %s: %s", path, e)
-
-    try:
-        # Stop ingest before wiping Neo4j/OpenSearch so the worker cannot race
-        # delete_document_subgraph (EntityNotFound / stuck at 75%).
-        cancel_document_ingest(document.id)
-        cancel_document_summary(document.id)
-        rag_mode, rag_config, _ = await get_project_rag_context(db, project_id)
-        create_pipeline(rag_config, rag_mode=rag_mode).delete_document_data(
-            str(document.id), project_id=str(project_id)
-        )
-    except Exception as e:
-        logger.error("Failed to delete vectors: %s", e)
-
-    await db.delete(document)
+    document.status = DocumentStatus.DELETING
+    document.processing_step = "Cleanup queued"
+    document.progress_pct = 0
+    add_outbox_event(
+        db,
+        event_type="cleanup_document",
+        aggregate_type="document",
+        aggregate_id=document.id,
+        project_id=project_id,
+        payload={},
+    )
     await db.commit()

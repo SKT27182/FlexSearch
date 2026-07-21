@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Shield, Users, FileText, Activity, BarChart3, Plus, Trash2, Search, ExternalLink, Loader2 } from 'lucide-react';
 import { Button, Input, Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { cn, formatRelativeTime, formatFileSize } from '@/lib/utils';
@@ -18,6 +18,7 @@ export function AdminPage() {
   
   // User creation state
   const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState<'USER' | 'ADMIN'>('USER');
@@ -29,11 +30,7 @@ export function AdminPage() {
   const [selectedUser, setSelectedUser] = useState<AdminUserStats | null>(null);
   const [userProjectsOpen, setUserProjectsOpen] = useState(false);
 
-  useEffect(() => {
-    loadData();
-  }, [activeTab]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
       if (activeTab === 'overview') {
@@ -51,19 +48,25 @@ export function AdminPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeTab]);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUserEmail || !newUserPassword) return;
+    if (!newUserName || !newUserEmail || !newUserPassword) return;
 
     setCreating(true);
     try {
       await adminApi.createUser({
+        name: newUserName,
         email: newUserEmail,
         password: newUserPassword,
         role: newUserRole,
       });
+      setNewUserName('');
       setNewUserEmail('');
       setNewUserPassword('');
       setShowCreateUser(false);
@@ -282,7 +285,11 @@ export function AdminPage() {
             </CardHeader>
             {showCreateUser && (
               <CardContent className="border-b border-border bg-secondary/20">
-                <form onSubmit={handleCreateUser} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <form onSubmit={handleCreateUser} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+                  <div className="md:col-span-1">
+                    <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5 block">Name</label>
+                    <Input value={newUserName} onChange={(e) => setNewUserName(e.target.value)} required />
+                  </div>
                   <div className="md:col-span-1">
                     <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5 block">Email</label>
                     <Input

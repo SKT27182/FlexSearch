@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.config import Settings, settings
 from app.db.models import RagMode
@@ -38,17 +38,33 @@ class ExtractionConfig(BaseModel):
 
 
 class FixedWindowChunkingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     chunk_size: int = Field(default=512, ge=64, le=8192)
     overlap: int = Field(default=50, ge=0, le=1024)
 
+    @model_validator(mode="after")
+    def validate_overlap(self) -> "FixedWindowChunkingParams":
+        if self.overlap >= self.chunk_size:
+            raise ValueError("overlap must be smaller than chunk_size")
+        return self
+
 
 class RecursiveChunkingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     chunk_size: int = Field(default=512, ge=64, le=8192)
     overlap: int = Field(default=50, ge=0, le=1024)
     preserve_structure: bool = Field(
         default=True,
         description="Keep markdown tables/code fences as atomic units",
     )
+
+    @model_validator(mode="after")
+    def validate_overlap(self) -> "RecursiveChunkingParams":
+        if self.overlap >= self.chunk_size:
+            raise ValueError("overlap must be smaller than chunk_size")
+        return self
 
 
 class SemanticChunkingParams(BaseModel):
@@ -60,6 +76,8 @@ class SemanticChunkingParams(BaseModel):
     the LangChain breakpoint strategy.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     min_chunk_size: int = Field(default=100, ge=32, le=4096)
     max_chunk_size: int = Field(default=1000, ge=128, le=16384)
@@ -68,18 +86,39 @@ class SemanticChunkingParams(BaseModel):
     ] = "percentile"
     buffer_size: int = Field(default=1, ge=1, le=10)
 
+    @model_validator(mode="after")
+    def validate_sizes(self) -> "SemanticChunkingParams":
+        if self.min_chunk_size > self.max_chunk_size:
+            raise ValueError("min_chunk_size must not exceed max_chunk_size")
+        return self
+
 
 class ParentChildChunkingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     parent_chunk_size: int = Field(default=1500, ge=256, le=16384)
     child_chunk_size: int = Field(default=300, ge=64, le=4096)
     overlap: int = Field(default=50, ge=0, le=1024)
 
+    @model_validator(mode="after")
+    def validate_sizes(self) -> "ParentChildChunkingParams":
+        if self.child_chunk_size > self.parent_chunk_size:
+            raise ValueError("child_chunk_size must not exceed parent_chunk_size")
+        if self.overlap >= self.child_chunk_size:
+            raise ValueError("overlap must be smaller than child_chunk_size")
+        return self
+
 
 class ChunkingConfig(BaseModel):
-    strategy: Literal[
-        "fixed_window", "recursive", "semantic", "parent_child"
-    ] = "fixed_window"
+    strategy: Literal["fixed_window", "recursive", "semantic", "parent_child"] = (
+        "fixed_window"
+    )
     params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_strategy_params(self) -> "ChunkingConfig":
+        self.resolved_params()
+        return self
 
     def resolved_params(self) -> BaseModel:
         match self.strategy:
@@ -356,7 +395,9 @@ class GraphRagConfig(BaseModel):
             "indexing": self.indexing.model_dump(mode="json"),
         }
         if self.graph_backend == "microsoft":
-            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(mode="json")
+            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(
+                mode="json"
+            )
         return _stable_hash(payload)
 
     def graph_indexing_fingerprint(self) -> str:
@@ -365,7 +406,9 @@ class GraphRagConfig(BaseModel):
             "extraction": self.extraction.model_dump(mode="json"),
         }
         if self.graph_backend == "microsoft":
-            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(mode="json")
+            payload["microsoft_indexing"] = self.microsoft_indexing.model_dump(
+                mode="json"
+            )
         else:
             payload["indexing"] = self.indexing.model_dump(mode="json")
         return _stable_hash(payload)

@@ -139,9 +139,7 @@ async def project_suggestions(
     db: Annotated[AsyncSession, Depends(get_db)],
     count: int = 5,
 ) -> SuggestionsResponse:
-    await check_rate_limit(
-        request, SENSITIVE_RULE, user_id=str(current_user.id)
-    )
+    await check_rate_limit(request, SENSITIVE_RULE, user_id=str(current_user.id))
     await verify_project_access(project_id, current_user, db)
     count = max(1, min(count, 10))
     try:
@@ -165,9 +163,7 @@ async def followup_suggestions(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SuggestionsResponse:
-    await check_rate_limit(
-        request, SENSITIVE_RULE, user_id=str(current_user.id)
-    )
+    await check_rate_limit(request, SENSITIVE_RULE, user_id=str(current_user.id))
     await verify_project_access(body.project_id, current_user, db)
     try:
         questions = await generate_followup_questions(

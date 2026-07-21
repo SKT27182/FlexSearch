@@ -43,14 +43,10 @@ def test_fixed_window_uses_langchain_offsets() -> None:
 
 
 def test_recursive_preserve_structure_tags_code() -> None:
-    text = (
-        "Prose before.\n\n"
-        "```python\ndef hello():\n    return 1\n```\n\n"
-        "Prose after."
+    text = "Prose before.\n\n```python\ndef hello():\n    return 1\n```\n\nProse after."
+    chunks = RecursiveChunking(chunk_size=40, overlap=0, preserve_structure=True).chunk(
+        text, "doc-rc"
     )
-    chunks = RecursiveChunking(
-        chunk_size=40, overlap=0, preserve_structure=True
-    ).chunk(text, "doc-rc")
     joined = "\n".join(c.content for c in chunks)
     assert "```python" in joined
     assert "def hello" in joined

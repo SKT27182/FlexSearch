@@ -25,25 +25,6 @@ export function DocumentPreviewDialog({
   documentId,
   filename,
 }: DocumentPreviewDialogProps) {
-  const [content, setContent] = useState('');
-  const [truncated, setTruncated] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    setError(null);
-    documentsApi
-      .getContent(projectId, documentId)
-      .then(({ content: text, truncated: t }) => {
-        setContent(text);
-        setTruncated(t);
-      })
-      .catch(() => setError('Could not load extracted text.'))
-      .finally(() => setLoading(false));
-  }, [open, projectId, documentId]);
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -51,7 +32,34 @@ export function DocumentPreviewDialog({
           <DialogTitle>{filename}</DialogTitle>
           <p className="text-sm text-muted-foreground">Extracted content</p>
         </DialogHeader>
-        <DialogBody>
+        <DialogBody>{open && <PreviewContent key={`${projectId}:${documentId}`} projectId={projectId} documentId={documentId} />}</DialogBody>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PreviewContent({ projectId, documentId }: { projectId: string; documentId: string }) {
+  const [content, setContent] = useState('');
+  const [truncated, setTruncated] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    documentsApi
+      .getContent(projectId, documentId)
+      .then(({ content: text, truncated: t }) => {
+        if (!active) return;
+        setContent(text);
+        setTruncated(t);
+      })
+      .catch(() => { if (active) setError('Could not load extracted text.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [projectId, documentId]);
+
+  return (
+    <>
           {loading && (
             <div className="flex justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -70,8 +78,6 @@ export function DocumentPreviewDialog({
               </div>
             </>
           )}
-        </DialogBody>
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

@@ -43,6 +43,8 @@ class ChatQueryResponse(BaseModel):
     output_tokens: int = 0
     latency_ms: int = 0
     empty_retrieval: bool = False
+    grounded: bool = False
+    invalid_citations: list[int] = Field(default_factory=list)
     debug: dict[str, Any] | None = None
 
 

@@ -15,6 +15,7 @@ import httpx
 from app.services.website.content_extractor import extract_clean_content
 from app.services.website.schemas import CrawledPage
 from app.utils.logger import create_logger
+from app.services.safe_http import SafeOutboundHttpClient
 
 logger = create_logger(__name__)
 
@@ -139,8 +140,7 @@ async def crawl_website(
     queue: deque[tuple[str, int]] = deque([(normalised_start, 0)])
     pages_fetched = 0
 
-    async with httpx.AsyncClient(
-        follow_redirects=False,
+    async with SafeOutboundHttpClient(
         headers={"User-Agent": USER_AGENT},
         timeout=30,
     ) as client:

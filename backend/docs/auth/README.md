@@ -58,9 +58,9 @@ Load User where id == UUID(sub)   ← Postgres is source of truth
 Authorize (owner? admin? administer target?)
 ```
 
-Why reload the row? If an admin demotes a user or a row is deleted, the next request sees live state even though the old JWT still carries a stale `role` claim until `exp`. Clients should refresh UI gates from `GET /api/auth/me`, not from decoding the token alone.
+Why reload the row? Authorization uses live database state and verifies the JWT's `token_version`. Password resets, role changes, disablement, and administrative resets increment that version and revoke every outstanding access token immediately.
 
-There are **no refresh tokens** and **no logout denylist**. When the JWT expires, log in again. “Logged out” on the client means discarding the token; the server only cares about signature, expiry, and “user still exists.”
+There are **no refresh tokens**. Access tokens expire after 15 minutes and exist only in browser memory, so reload or closing the tab requires login. Logout clears all client state; security-sensitive account changes revoke tokens through `token_version`.
 
 ### Bearer tokens
 
@@ -72,7 +72,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
 | Credential | Used for | Not used for |
 |------------|----------|--------------|
-| **Password** | Login only (`POST /api/auth/login`); stored as bcrypt hash | Sent on every API call |
+| **Password** | Login only; new hashes use Argon2id and legacy bcrypt is rehashed after one successful login | Sent on every API call |
 | **JWT access token** | Proving identity on protected routes (`Authorization: Bearer …`) | Long-lived API keys or refresh |
 | **HTTP Basic** | Swagger/OpenAPI docs only (`/api/docs`) | Normal product APIs |
 | **Chat session** | Conversation history scoped to `(project_id, user_id)` | Login state |
@@ -354,7 +354,7 @@ Admin user management: see [backend README API map](../../README.md#api-surface-
 |-----|---------|
 | `JWT_SECRET` | Signing key (required) |
 | `JWT_ALGORITHM` | Default `HS256` |
-| `JWT_EXPIRE_MINUTES` | Default `60` |
+| `JWT_EXPIRE_MINUTES` | Fixed production policy: `15` |
 | `INFRA_HUB_POSTGRES_DB` | Default `main_db` |
 | `INFRA_HUB_POSTGRES_URL` | Optional override; else derived from `POSTGRES_URL` with `main_db` |
 | `CRAWL_BLOCK_PRIVATE_URLS` | SSRF guard for crawl URLs (related ops hardening) |
@@ -362,10 +362,10 @@ Admin user management: see [backend README API map](../../README.md#api-surface-
 
 ---
 
-## Known gaps (code)
+## Authorization invariants
 
-1. **`get_current_active_user` does not check activity** — only infra-hub login checks `is_active`.
-2. **`AdminCreateUser` does not include `name`**, but `User.name` is `nullable=False` — admin user create can fail at insert unless fixed.
-3. **JWT `role` vs DB role** — clients must not trust the claim for UI gates without refreshing `/api/auth/me`.
-4. **No refresh tokens / logout denylist** — expiry-only.
-5. **Duplicate `has_admin_access`** in `dependencies.py` and `project_access.py`.
+1. Every protected request loads an active user and validates `token_version`.
+2. INFRA_ADMIN may administer ADMIN and USER; ADMIN may administer USER only.
+3. Out-of-scope administrative targets and chat sessions return 404.
+4. Session ownership is checked against both user and project before any Redis, history, retrieval, or LLM work.
+5. The frontend never persists authentication material.

@@ -5,9 +5,10 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import get_current_active_user
-from app.db.models import RagMode, User
+from app.db.models import User
 from app.prompts import list_prompt_names
 from app.schemas.rag_config import ChatConfig, GraphRagConfig, VectorRagConfig
+from app.services.upload_validation import SUPPORTED_FORMATS
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -27,6 +28,21 @@ def _chat_options() -> dict:
             "multihop",
             "debug",
         ],
+    }
+
+
+@router.get("/supported-formats")
+async def get_supported_formats(
+    _: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    return {
+        "formats": [
+            {
+                "content_type": item.content_type,
+                "extensions": list(item.extensions),
+            }
+            for item in SUPPORTED_FORMATS
+        ]
     }
 
 

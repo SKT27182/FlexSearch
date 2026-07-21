@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+
+from app.db.models import OutboxEvent
 
 
 async def create_user_and_login(client: AsyncClient, email: str) -> str:
@@ -34,8 +37,8 @@ async def test_crawl_submit_endpoint(async_client: AsyncClient, db_session):
     project_id = proj.json()["id"]
 
     with patch(
-        "app.api.website.schedule_website_crawl", return_value="crawl:test-job"
-    ) as mock_sched:
+        "app.services.url_safety.resolve_host_ips", return_value=["93.184.216.34"]
+    ):
         resp = await async_client.post(
             f"/api/projects/{project_id}/crawl",
             headers=headers,
@@ -43,9 +46,14 @@ async def test_crawl_submit_endpoint(async_client: AsyncClient, db_session):
         )
     assert resp.status_code == 202, resp.text
     body = resp.json()
-    assert body["job_id"] == "crawl:test-job"
+    assert body["job_id"].startswith(f"crawl:{project_id}:")
     assert body["project_id"] == project_id
-    mock_sched.assert_called_once()
+    event = (
+        await db_session.execute(
+            select(OutboxEvent).where(OutboxEvent.event_type == "website_crawl")
+        )
+    ).scalar_one()
+    assert event.payload["job_id"] == body["job_id"]
 
 
 @pytest.mark.asyncio

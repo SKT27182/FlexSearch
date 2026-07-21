@@ -9,6 +9,15 @@ import type {
 } from './rag-types';
 
 const API_BASE_URL = '/api';
+let accessToken: string | null = null;
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
 
 // Create axios instance
 export const api: AxiosInstance = axios.create({
@@ -20,7 +29,7 @@ export const api: AxiosInstance = axios.create({
 
 // Request interceptor - add auth token
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token');
+  const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -32,10 +41,10 @@ api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     if (error.response?.status === 401) {
-      // Token expired - try refresh or logout
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      window.location.href = '/login';
+      setAccessToken(null);
+      if (!error.config?.url?.endsWith('/auth/login')) {
+        window.dispatchEvent(new Event('flexsearch:unauthorized'));
+      }
     }
     return Promise.reject(error);
   }
@@ -56,7 +65,6 @@ export interface RegisterData {
 
 export interface AuthTokens {
   access_token: string;
-  refresh_token: string;
   token_type: string;
 }
 
@@ -107,12 +115,6 @@ export const authApi = {
     });
   },
 
-  refresh: async (refreshToken: string): Promise<AuthTokens> => {
-    const { data } = await api.post<AuthTokens>('/auth/refresh', {
-      refresh_token: refreshToken,
-    });
-    return data;
-  },
 };
 
 // ============ Projects API ============
@@ -125,6 +127,9 @@ export interface Project {
   rag_mode: RagMode;
   rag_config: RagConfig;
   graph_index_status: GraphIndexState | null;
+  rag_generation: number;
+  rag_transition_status: string;
+  rag_transition_error?: string | null;
   document_count?: number;
   created_at: string;
   updated_at: string;
@@ -205,8 +210,8 @@ export const projectsApi = {
     id: string,
     rag_mode: RagMode,
     graph_backend?: GraphBackend
-  ): Promise<{ rag_mode: RagMode; message: string; documents_queued: number }> => {
-    const { data } = await api.patch<{ rag_mode: RagMode; message: string; documents_queued: number }>(
+  ): Promise<{ rag_mode: RagMode; generation: number; transition_status: 'switching'; documents_total: number }> => {
+    const { data } = await api.patch<{ rag_mode: RagMode; generation: number; transition_status: 'switching'; documents_total: number }>(
       `/projects/${id}/rag-mode`,
       { rag_mode, graph_backend }
     );
@@ -274,7 +279,7 @@ export interface RetrievedChunk {
   document_id: string;
   content: string;
   score: number;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 }
 
 export interface RetrievalQueryRequest {
@@ -361,6 +366,8 @@ export interface ChatQueryResponse {
   output_tokens: number;
   latency_ms: number;
   empty_retrieval: boolean;
+  grounded: boolean;
+  invalid_citations: number[];
 }
 
 export interface ChatSession {
@@ -435,7 +442,7 @@ export const chatApi = {
 
   stream: async (request: ChatQueryRequest, handlers: ChatStreamHandlers): Promise<void> => {
     const { fetchEventSource } = await import('@microsoft/fetch-event-source');
-    const token = localStorage.getItem('access_token');
+    const token = getAccessToken();
     await fetchEventSource('/api/chat/stream', {
       method: 'POST',
       headers: {
@@ -525,7 +532,7 @@ export type JobStreamHandlers = {
 
 async function streamJobEvents(jobId: string, handlers: JobStreamHandlers): Promise<void> {
   const { fetchEventSource } = await import('@microsoft/fetch-event-source');
-  const token = localStorage.getItem('access_token');
+  const token = getAccessToken();
   await fetchEventSource(`/api/jobs/${jobId}/events`, {
     method: 'GET',
     headers: {
@@ -691,7 +698,7 @@ export const adminApi = {
     return data;
   },
 
-  createUser: async (user: { email: string; password: string; role: string }): Promise<User> => {
+  createUser: async (user: { name: string; email: string; password: string; role: string }): Promise<User> => {
     const { data } = await api.post<User>('/admin/users', user);
     return data;
   },

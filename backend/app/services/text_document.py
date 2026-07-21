@@ -30,7 +30,9 @@ TEXT_INGEST_TYPES = frozenset(
 )
 
 
-def guess_content_type(filename: str, fallback: str = "application/octet-stream") -> str:
+def guess_content_type(
+    filename: str, fallback: str = "application/octet-stream"
+) -> str:
     ext = Path(filename).suffix.lower()
     mapping = {
         ".pdf": "application/pdf",
