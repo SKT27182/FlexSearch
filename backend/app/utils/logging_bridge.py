@@ -101,6 +101,16 @@ def _clear_non_file_handlers(logger: logging.Logger) -> None:
             pass
 
 
+def _close_handlers(logger: logging.Logger) -> None:
+    """Remove and close every handler owned by ``logger``."""
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
 def _attach_colored_console(
     logger: logging.Logger,
     level: int,
@@ -163,7 +173,11 @@ def setup_unified_logging(level: str | None = None) -> Path:
     root = logging.getLogger()
     root.setLevel(min(root.level or level_int, level_int))
 
-    if not _has_backend_file_handler(root, log_path):
+    # Local development already redirects/tees the process' combined output to
+    # this file. Attaching a FileHandler to that same path writes every record
+    # twice (once directly and once through tee/redirection).
+    externally_captured = os.environ.get("FLEXSEARCH_EXTERNAL_LOG_CAPTURE") == "1"
+    if not externally_captured and not _has_backend_file_handler(root, log_path):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
         file_handler.setLevel(level_int)
@@ -178,6 +192,58 @@ def setup_unified_logging(level: str | None = None) -> Path:
 
     configure_third_party_loggers(level)
     _CONFIGURED = True
+    return log_path
+
+
+def configure_celery_logging(level: str | None = None) -> Path:
+    """Make Celery and application records use the FlexSearch logging stack.
+
+    Connecting this to Celery's ``setup_logging`` signal prevents Celery from
+    hijacking the root logger and redirecting our stderr console handler as
+    fake ``WARNING/MainProcess`` messages.
+    """
+    log_path = backend_log_path()
+    level_int = _level_int(level or settings.log_level)
+    root = logging.getLogger()
+    _close_handlers(root)
+    root.setLevel(level_int)
+
+    console = logging.StreamHandler()
+    console.setLevel(level_int)
+    console.setFormatter(CustomFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
+    root.addHandler(console)
+
+    externally_captured = os.environ.get("FLEXSEARCH_EXTERNAL_LOG_CAPTURE") == "1"
+    if not externally_captured:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setLevel(level_int)
+        file_handler.setFormatter(
+            logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
+        )
+        root.addHandler(file_handler)
+
+    # App loggers are created during imports. Route them through the root once
+    # instead of keeping their per-module console handlers as a second path.
+    for name, value in logging.root.manager.loggerDict.items():
+        if name == "app" or name.startswith("app."):
+            if isinstance(value, logging.Logger):
+                _close_handlers(value)
+                value.propagate = True
+
+    # These lifecycle messages account for nearly all idle worker noise. Keep
+    # application INFO logs while surfacing only Celery warnings/errors.
+    for name in (
+        "celery.beat",
+        "celery.worker.strategy",
+        "celery.app.trace",
+    ):
+        celery_logger = logging.getLogger(name)
+        _close_handlers(celery_logger)
+        celery_logger.setLevel(logging.WARNING)
+        celery_logger.propagate = True
+
+    logging.captureWarnings(True)
     return log_path
 
 

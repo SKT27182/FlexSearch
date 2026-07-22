@@ -7,6 +7,7 @@ import logging
 from app.core.config import settings
 from app.utils.logger import CustomFormatter
 from app.utils.logging_bridge import (
+    configure_celery_logging,
     configure_third_party_loggers,
     sql_echo_enabled,
 )
@@ -72,3 +73,36 @@ def test_postgres_engine_echo_disabled() -> None:
     from app.db.postgres import engine
 
     assert engine.echo is False
+
+
+def test_configure_celery_logging_uses_root_colored_handler(
+    monkeypatch, tmp_path
+) -> None:
+    root = logging.getLogger()
+    original_root_handlers = root.handlers[:]
+    original_root_level = root.level
+    app_logger = logging.getLogger("app.test.celery_logging")
+    original_app_handlers = app_logger.handlers[:]
+    original_app_propagate = app_logger.propagate
+    root.handlers = []
+    app_logger.handlers = [logging.StreamHandler()]
+    app_logger.propagate = False
+    monkeypatch.setenv("BACKEND_LOG_FILE", str(tmp_path / "worker.log"))
+    monkeypatch.setenv("FLEXSEARCH_EXTERNAL_LOG_CAPTURE", "1")
+
+    try:
+        configure_celery_logging("INFO")
+
+        consoles = _console_handlers(root)
+        assert len(consoles) == 1
+        assert isinstance(consoles[0].formatter, CustomFormatter)
+        assert app_logger.handlers == []
+        assert app_logger.propagate is True
+        assert logging.getLogger("celery.app.trace").level == logging.WARNING
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers = original_root_handlers
+        root.setLevel(original_root_level)
+        app_logger.handlers = original_app_handlers
+        app_logger.propagate = original_app_propagate

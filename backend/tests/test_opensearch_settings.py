@@ -43,3 +43,8 @@ def test_celery_routes_six_tasks_across_four_queues() -> None:
     queues = {entry["queue"] for entry in routes.values()}
     assert queues == {"ingest", "graph", "summary", "default"}
     assert celery_app.conf.beat_schedule["dispatch-outbox"]["schedule"] == 5.0
+    assert celery_app.conf.beat_schedule["dispatch-outbox"]["options"] == {
+        "expires": 5.0
+    }
+    assert celery_app.conf.worker_hijack_root_logger is False
+    assert celery_app.conf.worker_redirect_stdouts is False

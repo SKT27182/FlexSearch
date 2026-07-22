@@ -116,6 +116,19 @@ async def _dispatch_event(db: AsyncSession, event: OutboxEvent) -> None:
         )
         return
     if event.event_type == "process_document":
+        result = await db.execute(
+            select(Document.status).where(
+                Document.id == event.aggregate_id,
+                Document.project_id == event.project_id,
+            )
+        )
+        status = result.scalar_one_or_none()
+        if status is None or status == DocumentStatus.DELETING:
+            logger.info(
+                "Skipping stale ingest event for missing/deleting document %s",
+                event.aggregate_id,
+            )
+            return
         from app.services.document_tasks import schedule_process_document
         from app.services.document_worker import ReindexMode
 

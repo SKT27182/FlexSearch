@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from celery import Celery
-from celery.signals import beat_init, worker_init
+from celery.signals import beat_init, setup_logging, worker_init
 
 from app.core.config import settings
 
@@ -32,6 +32,8 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    worker_hijack_root_logger=False,
+    worker_redirect_stdouts=False,
     task_always_eager=settings.celery_task_always_eager,
     task_eager_propagates=True,
     task_default_queue="default",
@@ -48,9 +50,21 @@ celery_app.conf.update(
         "dispatch-outbox": {
             "task": "app.services.celery_tasks.dispatch_outbox_task",
             "schedule": 5.0,
+            # A periodic dispatch is useful only while it is fresh. Do not run
+            # a large backlog after a worker has been offline.
+            "options": {"expires": 5.0},
         }
     },
 )
+
+
+def _configure_worker_logging(**_: object) -> None:
+    from app.utils.logging_bridge import configure_celery_logging
+
+    configure_celery_logging(settings.log_level)
+
+
+setup_logging.connect(_configure_worker_logging, weak=False)
 
 
 def _verify_database_revision(**_: object) -> None:

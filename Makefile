@@ -86,15 +86,19 @@ dev-local: install prepare-logs ## Run backend + frontend + Celery worker locall
 		}; \
 		trap '"'"'kill $$backend_pid $$frontend_pid $$worker_pid 2>/dev/null || true; rm -f "$(BACKEND_PID)" "$(FRONTEND_PID)" "$(WORKER_PID)"'"'"' INT TERM EXIT; \
 		( setup_log_pipe "$(BACKEND_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
-		  PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
+		  export FLEXSEARCH_EXTERNAL_LOG_CAPTURE=1; \
+		  exec env PYTHONWARNINGS=ignore::UserWarning:multiprocessing.resource_tracker \
 		  $(BACKEND_UVICORN) app.main:app --reload --port "$${API_PORT:-$(BACKEND_PORT)}" --app-dir backend \
 		) & backend_pid=$$!; echo $$backend_pid > "$(BACKEND_PID)"; \
 		( setup_log_pipe "$(WORKER_LOG)"; set -a; [ -f backend/.env ] && source backend/.env; set +a; \
-		  cd backend && .venv/bin/celery -A app.celery_app worker --beat --loglevel=INFO \
+		  export FLEXSEARCH_EXTERNAL_LOG_CAPTURE=1 BACKEND_LOG_FILE="$(WORKER_LOG)"; \
+		  cd backend && exec .venv/bin/celery -A app.celery_app worker --beat --loglevel=INFO \
 		    --schedule="$(CELERY_BEAT_DB)" \
 		    -Q ingest,graph,summary,default --pool="$(CELERY_POOL)" --concurrency="$(CELERY_CONCURRENCY)" \
 		) & worker_pid=$$!; echo $$worker_pid > "$(WORKER_PID)"; \
-		( setup_log_pipe "$(FRONTEND_LOG)"; cd frontend && pnpm run dev ) & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
+		( setup_log_pipe "$(FRONTEND_LOG)"; cd frontend && \
+		  exec env NODE_OPTIONS=--disable-warning=DEP0205 pnpm run dev \
+		) & frontend_pid=$$!; echo $$frontend_pid > "$(FRONTEND_PID)"; \
 		wait $$backend_pid $$frontend_pid $$worker_pid'
 
 worker-local: ## Run Celery worker and local outbox scheduler

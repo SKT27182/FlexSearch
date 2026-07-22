@@ -60,6 +60,10 @@ class GraphExtractor:
             ],
             temperature=0.0,
             max_tokens=2048,
+            # Large extraction models can legitimately take longer than chat
+            # requests. The previous 120s default caused passages to be silently
+            # omitted from the graph on otherwise healthy provider responses.
+            timeout_sec=300.0,
         )
         payload = _parse_json(response.content)
         entities_raw = payload.get("entities", [])[: self._max_entities]
