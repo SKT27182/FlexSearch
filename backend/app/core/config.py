@@ -396,6 +396,14 @@ class Settings(BaseSettings):
             "(API-only; separate from MODEL_NAME and EMBEDDING_MODEL)"
         ),
     )
+    graphrag_embedding_dimension: int = Field(
+        default=1536,
+        ge=1,
+        description=(
+            "Vector dimension returned by GRAPHRAG_EMBEDDING_MODEL; used by "
+            "Microsoft GraphRAG's vector store"
+        ),
+    )
     graphrag_embedding_api_key: str = Field(
         default="",
         description=(

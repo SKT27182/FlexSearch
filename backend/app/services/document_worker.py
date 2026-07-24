@@ -24,7 +24,7 @@ from app.schemas.rag_config import (
     parse_rag_config,
 )
 from app.services.document_status import update_document_status
-from app.services.graph_index_tasks import schedule_graph_index_rebuild
+from app.services.graph_index_tasks import mark_microsoft_graph_index_dirty
 from app.services.document_storage import (
     build_extracted_meta,
     extracted_md_key,
@@ -144,6 +144,10 @@ async def _update_graph_index_status(
     stats = get_neo4j_store().get_stats(str(project.id))
     now = datetime.now(timezone.utc).isoformat()
     payload: dict[str, Any] = {
+        # This helper is used by the per-document Neo4j pipeline.  Keep the
+        # discriminator in every replacement payload so status reconciliation
+        # checks ingest tasks rather than the Microsoft rebuild task.
+        "backend": "neo4j",
         "status": status,
         "indexed_at": now,
         "entity_count": stats.entity_count,
@@ -180,24 +184,12 @@ async def _handle_graph_after_extract(
 ) -> None:
     if _is_microsoft_graph(rag_config):
         await _complete_graph_document(db, document)
-        # Microsoft GraphRAG indexes the whole project at once, so wait until
-        # every document in the project has reached a terminal state before
-        # scheduling a rebuild. Otherwise each finished doc kicks off a build
-        # and they overlap (the debounce cancel does not stop an in-flight
-        # worker). Only the last document to finish triggers a single rebuild.
-        pending = await _count_non_terminal_documents(db, project.id)
-        if pending:
-            logger.info(
-                "Graph rebuild deferred for project %s: %d document(s) still processing",
-                project.id,
-                pending,
-            )
-            return
+        mark_microsoft_graph_index_dirty(project)
+        await db.commit()
         logger.info(
-            "All documents ready for project %s; scheduling graph rebuild",
+            "Microsoft GraphRAG source changed for project %s; manual rebuild required",
             project.id,
         )
-        schedule_graph_index_rebuild(project.id, generation=project.rag_generation)
         return
     await _run_graph_index(
         db,
@@ -229,25 +221,39 @@ async def _count_non_terminal_documents(db: AsyncSession, project_id: UUID) -> i
 
 async def _safe_fail_document(
     db: AsyncSession,
-    document: Document,
-    project: Project,
+    document_id: UUID,
+    project_id: UUID,
     *,
     processing_step: str,
     error_message: str,
     mark_graph_failed: bool = False,
 ) -> None:
-    """Best-effort FAILED status; ignore if the row was deleted mid-ingest."""
+    """Best-effort FAILED status using fresh rows and a clean transaction."""
+    # The triggering failure may be a failed flush/commit (notably when a
+    # document is deleted during ingest). Never reuse expired ORM instances in
+    # this recovery path.
+    await db.rollback()
     if mark_graph_failed:
         try:
-            await _update_graph_index_status(
-                db, project, status="failed", error=error_message
-            )
+            project = await db.get(Project, project_id)
+            if project is not None:
+                await _update_graph_index_status(
+                    db, project, status="failed", error=error_message
+                )
         except Exception:
+            await db.rollback()
             logger.debug(
                 "Could not mark graph index failed for project=%s",
-                project.id,
+                project_id,
                 exc_info=True,
             )
+    document = await db.get(Document, document_id)
+    if document is None:
+        logger.info(
+            "Document %s gone during fail update (likely deleted); skipping status write",
+            document_id,
+        )
+        return
     updated = await update_document_status(
         db,
         document,
@@ -259,7 +265,7 @@ async def _safe_fail_document(
     if not updated:
         logger.info(
             "Document %s gone during fail update (likely deleted); skipping status write",
-            document.id,
+            document_id,
         )
 
 
@@ -492,8 +498,8 @@ async def process_document(
             logger.exception("Neo4j error processing document %s", document_id)
             await _safe_fail_document(
                 db,
-                document,
-                project,
+                document_id,
+                project_id,
                 processing_step="Neo4j unavailable",
                 error_message=str(exc),
                 mark_graph_failed=True,
@@ -509,8 +515,8 @@ async def process_document(
             logger.exception("Document processing failed: %s", document_id)
             await _safe_fail_document(
                 db,
-                document,
-                project,
+                document_id,
+                project_id,
                 processing_step="Failed",
                 error_message=str(exc),
                 mark_graph_failed=(rag_mode == RagMode.GRAPH),
@@ -532,7 +538,7 @@ async def _complete_graph_document(db: AsyncSession, document: Document) -> None
         db,
         document,
         status=DocumentStatus.COMPLETED,
-        processing_step="Text extracted — graph index will rebuild shortly",
+        processing_step="Text extracted — rebuild graph index when ready",
         progress_pct=100,
         chunk_count=0,
     )

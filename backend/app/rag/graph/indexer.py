@@ -93,9 +93,11 @@ class GraphIndexer:
 
             try:
                 extracted = await extractor.extract(project_id, passage_text)
-            except Exception:
-                logger.exception("Graph extraction failed for passage %s", pid)
-                continue
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Graph extraction failed for passage {idx + 1}/{len(passages)}: "
+                    f"{exc}"
+                ) from exc
 
             for entity in extracted.entities:
                 entity_records[entity.entity_id] = EntityRecord(

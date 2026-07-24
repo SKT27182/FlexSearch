@@ -29,7 +29,7 @@ async def test_stale_process_document_event_is_skipped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_extraction_allows_slow_large_models() -> None:
+async def test_graph_extraction_uses_bounded_timeout() -> None:
     llm = AsyncMock()
     llm.complete.return_value = SimpleNamespace(
         content='{"entities": [], "relationships": []}'
@@ -39,4 +39,4 @@ async def test_graph_extraction_allows_slow_large_models() -> None:
 
     await extractor.extract(str(uuid4()), "passage")
 
-    assert llm.complete.await_args.kwargs["timeout_sec"] == 300.0
+    assert llm.complete.await_args.kwargs["timeout_sec"] == 120.0

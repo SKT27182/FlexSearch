@@ -7,7 +7,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-GraphIndexStatusValue = Literal["pending", "indexing", "ready", "failed", "disabled"]
+GraphIndexStatusValue = Literal[
+    "pending", "indexing", "ready", "stale", "failed", "disabled"
+]
 GraphBackend = Literal["neo4j", "microsoft"]
 
 

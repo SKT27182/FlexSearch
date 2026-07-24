@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -108,6 +109,7 @@ def _indexing_method_for(method_name: str):
 
 
 PARQUET_FILES = (
+    "documents.parquet",
     "entities.parquet",
     "relationships.parquet",
     "communities.parquet",
@@ -120,10 +122,275 @@ GRAPHML_CANDIDATES = (
     "artifacts/graph.graphml",
     "artifacts/snapshots/graph.graphml",
 )
+FULL_REBUILD_REPLACED_SUBDIRS = ("input", "output", "logs")
+COMPACTING_CACHE_TYPE = "flexsearch_compacting_json"
 
 
 def graphrag_storage_prefix(project_id: UUID | str, generation: int) -> str:
     return f"projects/{project_id}/graphrag/generations/{generation}"
+
+
+def _has_incremental_update_baseline(root: Path) -> bool:
+    """True when a prior successful GraphRAG output can support an update run."""
+    output = root / "output"
+    return all((output / name).is_file() for name in PARQUET_FILES)
+
+
+def _baseline_document_text(root: Path) -> dict[str, str]:
+    """Return baseline document text keyed by stable document id."""
+    path = root / "output" / "documents.parquet"
+    if not path.is_file():
+        return {}
+    frame = pd.read_parquet(path, columns=["id", "text"])
+    return dict(zip(frame["id"].astype(str), frame["text"].fillna("").astype(str)))
+
+
+def _destructive_graph_changes(
+    root: Path, documents: list[dict[str, Any]]
+) -> tuple[set[str], set[str]]:
+    """Return baseline ids that were deleted or changed in active sources."""
+    baseline_text = _baseline_document_text(root)
+    active_text = {str(document["id"]): str(document["text"]) for document in documents}
+    baseline_ids = set(baseline_text)
+    active_ids = set(active_text)
+    deleted_ids = baseline_ids - active_ids
+    changed_ids = {
+        document_id
+        for document_id in baseline_ids & active_ids
+        if baseline_text[document_id] != active_text[document_id]
+    }
+    return deleted_ids, changed_ids
+
+
+def _prepare_full_rebuild_workspace(root: Path) -> None:
+    """Remove derived data while preserving the content-addressed LLM cache."""
+    for subdir in FULL_REBUILD_REPLACED_SUBDIRS:
+        path = root / subdir
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _prepare_cache_compaction_workspace(root: Path) -> None:
+    """Move the old cache aside and create an empty cache for live entries."""
+    cache = root / "cache"
+    source = root / "cache_source"
+    shutil.rmtree(source, ignore_errors=True)
+    if cache.exists():
+        cache.rename(source)
+    else:
+        source.mkdir(parents=True)
+    cache.mkdir(parents=True, exist_ok=True)
+
+
+class _CompactingJsonCache:
+    """Read-through cache that retains only entries used by the current build."""
+
+    def __init__(self, storage=None, source_storage=None, **_kwargs: Any) -> None:
+        from graphrag_cache.json_cache import JsonCache
+        from graphrag_storage import StorageConfig, create_storage
+
+        if source_storage is None:
+            raise ValueError("Compacting cache requires source_storage")
+        source = create_storage(StorageConfig.model_validate(source_storage))
+        self._active = JsonCache(storage=storage)
+        self._source = JsonCache(storage=source)
+
+    @classmethod
+    def _from_children(cls, active, source):
+        instance = cls.__new__(cls)
+        instance._active = active
+        instance._source = source
+        return instance
+
+    async def get(self, key: str) -> Any:
+        value = await self._active.get(key)
+        if value is not None:
+            return value
+        value = await self._source.get(key)
+        if value is not None:
+            await self._active.set(key, value)
+        return value
+
+    async def set(self, key: str, value: Any, debug_data: dict | None = None) -> None:
+        await self._active.set(key, value, debug_data)
+
+    async def has(self, key: str) -> bool:
+        return await self._active.has(key) or await self._source.has(key)
+
+    async def delete(self, key: str) -> None:
+        await self._active.delete(key)
+
+    async def clear(self) -> None:
+        await self._active.clear()
+
+    def child(self, name: str):
+        return self._from_children(
+            self._active.child(name),
+            self._source.child(name),
+        )
+
+
+def _enable_compacting_cache(config: Any) -> None:
+    """Configure GraphRAG to read old cache entries into a clean live cache."""
+    from graphrag_cache import CacheConfig, register_cache
+
+    register_cache(COMPACTING_CACHE_TYPE, _CompactingJsonCache)
+    config.cache = CacheConfig.model_validate(
+        {
+            "type": COMPACTING_CACHE_TYPE,
+            "storage": {"type": "file", "base_dir": "cache"},
+            "source_storage": {"type": "file", "base_dir": "cache_source"},
+        }
+    )
+
+
+def _validate_graph_index_outputs(root: Path, document_ids: set[str]) -> None:
+    """Reject publication when Parquet or LanceDB lineage is inconsistent."""
+    output = root / "output"
+    missing = [name for name in PARQUET_FILES if not (output / name).is_file()]
+    if missing:
+        raise RuntimeError(f"GraphRAG output missing: {', '.join(missing)}")
+
+    tables = {
+        name.removesuffix(".parquet"): pd.read_parquet(output / name)
+        for name in PARQUET_FILES
+    }
+    actual_document_ids = set(tables["documents"]["id"].astype(str))
+    if actual_document_ids != document_ids:
+        raise RuntimeError(
+            "GraphRAG documents do not match active project documents: "
+            f"expected={sorted(document_ids)} actual={sorted(actual_document_ids)}"
+        )
+    text_unit_document_ids = set(tables["text_units"]["document_id"].astype(str))
+    if not text_unit_document_ids.issubset(document_ids):
+        raise RuntimeError(
+            "GraphRAG text units reference inactive documents: "
+            f"{sorted(text_unit_document_ids - document_ids)}"
+        )
+
+    import lancedb
+
+    vector_db = lancedb.connect(output / "lancedb")
+    vector_tables = set(vector_db.table_names())
+    expected_tables = {
+        "entity_description": set(tables["entities"]["id"].astype(str)),
+        "text_unit_text": set(tables["text_units"]["id"].astype(str)),
+        "community_full_content": set(tables["community_reports"]["id"].astype(str)),
+    }
+    for table_name, expected_ids in expected_tables.items():
+        if table_name not in vector_tables:
+            raise RuntimeError(f"GraphRAG vector table missing: {table_name}")
+        actual_ids = set(vector_db.open_table(table_name).to_pandas()["id"].astype(str))
+        if actual_ids != expected_ids:
+            raise RuntimeError(
+                f"GraphRAG vector table {table_name} is inconsistent with Parquet"
+            )
+
+    graphml_path = output / "graph.graphml"
+    if not graphml_path.is_file():
+        raise RuntimeError("GraphRAG output missing: graph.graphml")
+
+
+def _prepare_index_input_documents(
+    root: Path,
+    documents: list[dict[str, Any]],
+    *,
+    is_update: bool,
+) -> pd.DataFrame:
+    """Build a valid full or additive-delta GraphRAG input dataframe.
+
+    Supplying ``input_documents`` makes GraphRAG skip its own update diff.
+    Therefore an update must contain only documents absent from the persisted
+    baseline; otherwise every existing document is appended again. Older
+    FlexSearch full indexes also wrote a null ``human_readable_id``, which
+    GraphRAG's incremental merge cannot increment, so repair that baseline in
+    the materialized workspace before starting the update.
+    """
+    frame = pd.DataFrame(documents).copy()
+    frame["human_readable_id"] = pd.RangeIndex(len(frame))
+    if not is_update:
+        return frame
+
+    baseline_path = root / "output" / "documents.parquet"
+    baseline = pd.read_parquet(baseline_path)
+    numeric_ids = pd.to_numeric(baseline["human_readable_id"], errors="coerce")
+    next_id = int(numeric_ids.max()) + 1 if numeric_ids.notna().any() else 0
+    for row_index in numeric_ids[numeric_ids.isna()].index:
+        numeric_ids.loc[row_index] = next_id
+        next_id += 1
+    baseline["human_readable_id"] = numeric_ids.astype("int64")
+    baseline.to_parquet(baseline_path, index=False)
+
+    existing_ids = set(baseline["id"].astype(str))
+    return frame.loc[~frame["id"].astype(str).isin(existing_ids)].copy()
+
+
+def _graphml_value(value: Any) -> str | int | float | bool:
+    """Convert Parquet/Pandas values to GraphML-supported scalar values."""
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        value = value.tolist()
+    if isinstance(value, (list, tuple, set)):
+        return json.dumps([str(item) for item in value])
+    if value is None or (not isinstance(value, (str, bytes)) and pd.isna(value)):
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def build_graphml_bytes(
+    entities: pd.DataFrame,
+    relationships: pd.DataFrame,
+) -> bytes:
+    """Create a GraphML snapshot from the current merged GraphRAG tables."""
+    import networkx as nx
+
+    graph = nx.Graph()
+    for entity in entities.to_dict(orient="records"):
+        title = str(entity.get("title") or "").strip()
+        if not title:
+            continue
+        graph.add_node(
+            title,
+            entity_id=_graphml_value(entity.get("id")),
+            human_readable_id=_graphml_value(entity.get("human_readable_id")),
+            type=_graphml_value(entity.get("type")),
+            frequency=_graphml_value(entity.get("frequency")),
+            degree=_graphml_value(entity.get("degree")),
+            description=_graphml_value(entity.get("description")),
+            text_unit_ids=_graphml_value(entity.get("text_unit_ids")),
+        )
+
+    for relationship in relationships.to_dict(orient="records"):
+        source = str(relationship.get("source") or "").strip()
+        target = str(relationship.get("target") or "").strip()
+        if not source or not target:
+            continue
+        graph.add_edge(
+            source,
+            target,
+            relationship_id=_graphml_value(relationship.get("id")),
+            human_readable_id=_graphml_value(relationship.get("human_readable_id")),
+            weight=_graphml_value(relationship.get("weight")),
+            combined_degree=_graphml_value(relationship.get("combined_degree")),
+            description=_graphml_value(relationship.get("description")),
+            text_unit_ids=_graphml_value(relationship.get("text_unit_ids")),
+        )
+
+    return "\n".join(nx.generate_graphml(graph, prettyprint=True)).encode("utf-8")
+
+
+def write_graphml_snapshot(root: Path) -> Path:
+    """Regenerate output/graph.graphml from the authoritative Parquet tables."""
+    output = root / "output"
+    graphml_path = output / "graph.graphml"
+    graphml_path.write_bytes(
+        build_graphml_bytes(
+            pd.read_parquet(output / "entities.parquet"),
+            pd.read_parquet(output / "relationships.parquet"),
+        )
+    )
+    return graphml_path
 
 
 def _set_graphrag_runtime_env() -> None:
@@ -247,7 +514,49 @@ def _patch_graphrag_runtime_settings(content: str) -> str:
         retry_block + "\n",
         content,
     )
+    content = _patch_graphrag_vector_size(
+        content, settings.graphrag_embedding_dimension
+    )
     return content
+
+
+def _patch_graphrag_vector_size(content: str, dimension: int) -> str:
+    """Set GraphRAG's vector-store size without relying on its 3072 default."""
+    lines = content.splitlines()
+    vector_store_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == "vector_store:" and not line.startswith((" ", "\t")):
+            vector_store_index = index
+            continue
+        if vector_store_index is None or index <= vector_store_index:
+            continue
+        if line and not line.startswith((" ", "\t")):
+            break
+        if line.startswith("  vector_size:"):
+            lines[index] = f"  vector_size: {dimension}"
+            return "\n".join(lines) + "\n"
+    if vector_store_index is None:
+        lines.extend(["", "vector_store:", f"  vector_size: {dimension}"])
+    else:
+        lines.insert(vector_store_index + 1, f"  vector_size: {dimension}")
+    return "\n".join(lines) + "\n"
+
+
+def _configured_graphrag_vector_size(text: str) -> int | None:
+    """Read the top-level vector_store.vector_size from persisted YAML text."""
+    in_vector_store = False
+    for line in text.splitlines():
+        if line.strip() == "vector_store:" and not line.startswith((" ", "\t")):
+            in_vector_store = True
+            continue
+        if in_vector_store and line and not line.startswith((" ", "\t")):
+            return None
+        if in_vector_store and line.startswith("  vector_size:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
 
 
 # Backward-compatible alias for tests/imports
@@ -317,6 +626,8 @@ def _needs_config_refresh(root: Path) -> bool:
         return True
     if "concurrent_requests:" not in text:
         return True
+    if _configured_graphrag_vector_size(text) != settings.graphrag_embedding_dimension:
+        return True
     prompts = root / "prompts"
     return not prompts.exists() or not any(prompts.iterdir())
 
@@ -332,6 +643,13 @@ class GraphRAGWorkspace:
         from graphrag.cli.initialize import initialize_project_at
 
         root.mkdir(parents=True, exist_ok=True)
+        settings_path = root / "settings.yaml"
+        # A materialized workspace already contains the persisted GraphRAG
+        # configuration and prompts. GraphRAG's initializer deliberately
+        # rejects an initialized directory unless ``force=True``; calling it
+        # again made every incremental rebuild and search fail immediately.
+        if settings_path.is_file() and not force:
+            return
         if is_local_embedding_model(settings.graphrag_embedding_model):
             raise ValueError(
                 "GRAPHRAG_EMBEDDING_MODEL must be a LiteLLM API embedding model "
@@ -344,7 +662,6 @@ class GraphRAGWorkspace:
             model=settings.model_name,
             embedding_model=settings.graphrag_embedding_model,
         )
-        settings_path = root / "settings.yaml"
         content = settings_path.read_text(encoding="utf-8")
         content = _patch_graphrag_litellm_settings(
             content,
@@ -370,10 +687,20 @@ class GraphRAGWorkspace:
         return True
 
     def sync_to_minio(
-        self, project_id: UUID | str, generation: int, root: Path
+        self,
+        project_id: UUID | str,
+        generation: int,
+        root: Path,
+        *,
+        replace_index_artifacts: bool = False,
+        replace_cache: bool = False,
     ) -> None:
         prefix = graphrag_storage_prefix(project_id, generation)
-        for sub in ("input", "output", "cache", "prompts", "logs"):
+        if replace_index_artifacts:
+            for sub in FULL_REBUILD_REPLACED_SUBDIRS:
+                self._storage.delete_prefix(f"{prefix}/{sub}")
+
+        for sub in ("input", "output", "prompts", "logs"):
             sub_path = root / sub
             if sub_path.exists():
                 self._storage.upload_directory(str(sub_path), f"{prefix}/{sub}")
@@ -384,6 +711,23 @@ class GraphRAGWorkspace:
                 settings_file.read_bytes(),
                 content_type="application/x-yaml",
             )
+
+        # Cache replacement is deliberately last. Retrieval never depends on
+        # cache, and a publication failure before this point leaves the old
+        # cache available for a retry.
+        cache_path = root / "cache"
+        if replace_cache:
+            self._storage.delete_prefix(f"{prefix}/cache")
+        if cache_path.exists():
+            self._storage.upload_directory(str(cache_path), f"{prefix}/cache")
+
+    def clear_index_for_empty_project(
+        self, project_id: UUID | str, generation: int
+    ) -> None:
+        """Remove all document-derived artifacts when no active documents remain."""
+        prefix = graphrag_storage_prefix(project_id, generation)
+        for sub in (*FULL_REBUILD_REPLACED_SUBDIRS, "cache"):
+            self._storage.delete_prefix(f"{prefix}/{sub}")
 
     async def materialize(self, project_id: UUID | str, generation: int) -> Path:
         root = Path(tempfile.mkdtemp(prefix=f"graphrag-{project_id}-"))
@@ -427,6 +771,8 @@ class GraphRAGWorkspace:
         project_id: UUID,
         *,
         is_update: bool = False,
+        force_full_rebuild: bool = False,
+        compact_cache: bool = False,
         manage_in_flight: bool = True,
         generation: int | None = None,
     ) -> None:
@@ -449,6 +795,8 @@ class GraphRAGWorkspace:
                 await self.build_index_for_project(
                     project_id,
                     is_update=is_update,
+                    force_full_rebuild=force_full_rebuild,
+                    compact_cache=compact_cache,
                     manage_in_flight=False,
                     generation=expected_generation,
                 )
@@ -477,12 +825,17 @@ class GraphRAGWorkspace:
                     )
                     return
 
+                previous = GraphIndexState.from_db(project.graph_index_status)
                 state = GraphIndexState(
                     backend="microsoft",
                     status="indexing",
+                    indexed_at=previous.indexed_at,
                     fingerprint=rag_config.graph_indexing_fingerprint(),
                     indexing_started_at=datetime.now(timezone.utc),
                     error=None,
+                    document_count=previous.document_count,
+                    entity_count=previous.entity_count,
+                    passage_count=previous.passage_count,
                 )
                 project.graph_index_status = state.to_db()
                 await db.commit()
@@ -494,6 +847,11 @@ class GraphRAGWorkspace:
 
                 docs = await _load_extracted_documents(db, project_id)
                 if not docs:
+                    await run_sync_in_std_thread(
+                        lambda: self.clear_index_for_empty_project(
+                            project_id, expected_generation
+                        )
+                    )
                     state = GraphIndexState(
                         backend="microsoft",
                         status="pending",
@@ -516,7 +874,67 @@ class GraphRAGWorkspace:
                 is_update,
             )
             root = await self.materialize(project_id, expected_generation)
-            df = pd.DataFrame(docs)
+            active_ids = {str(document["id"]) for document in docs}
+            deleted_ids, changed_ids = _destructive_graph_changes(root, docs)
+            if deleted_ids or changed_ids:
+                force_full_rebuild = True
+                compact_cache = True
+                logger.info(
+                    "GraphRAG baseline differs for project %s "
+                    "(%s deleted, %s changed); "
+                    "forcing full rebuild with cache compaction",
+                    project_id,
+                    len(deleted_ids),
+                    len(changed_ids),
+                )
+            requested_update = is_update
+            is_update = (
+                is_update
+                and not force_full_rebuild
+                and _has_incremental_update_baseline(root)
+            )
+            if requested_update and not is_update:
+                logger.info(
+                    "GraphRAG update requested for project %s but a clean full "
+                    "build is required",
+                    project_id,
+                )
+            if not is_update:
+                _prepare_full_rebuild_workspace(root)
+            if compact_cache:
+                _prepare_cache_compaction_workspace(root)
+            all_documents_df = pd.DataFrame(docs)
+            df = _prepare_index_input_documents(
+                root,
+                docs,
+                is_update=is_update,
+            )
+            if is_update:
+                logger.info(
+                    "GraphRAG additive delta for project %s: %s new of %s total documents",
+                    project_id,
+                    len(df),
+                    len(all_documents_df),
+                )
+                if df.empty:
+                    async with async_session_maker() as db:
+                        project = await _get_project(db, project_id)
+                        previous = GraphIndexState.from_db(project.graph_index_status)
+                        project.graph_index_status = GraphIndexState(
+                            backend="microsoft",
+                            status="ready",
+                            indexed_at=previous.indexed_at,
+                            fingerprint=previous.fingerprint,
+                            document_count=previous.document_count,
+                            entity_count=previous.entity_count,
+                            passage_count=previous.passage_count,
+                        ).to_db()
+                        await db.commit()
+                    logger.info(
+                        "GraphRAG manual rebuild found no source changes for project %s",
+                        project_id,
+                    )
+                    return
             root_path = root
             method_name = rag_config.microsoft_indexing.method
 
@@ -528,6 +946,8 @@ class GraphRAGWorkspace:
                 install_graphrag_rate_limit_retry()
                 _set_graphrag_runtime_env()
                 config = load_config(root_path)
+                if compact_cache:
+                    _enable_compacting_cache(config)
                 method = _indexing_method_for(method_name)
                 logger.info(
                     "GraphRAG build_index called for project %s (method=%s, is_update=%s)",
@@ -549,9 +969,23 @@ class GraphRAGWorkspace:
             if errors:
                 raise RuntimeError("; ".join(str(e) for e in errors if e))
 
+            graphml_path = write_graphml_snapshot(root)
+            logger.info(
+                "Regenerated GraphML snapshot for project %s at %s",
+                project_id,
+                graphml_path,
+            )
+
             input_csv = root / "input" / "documents.csv"
             input_csv.parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(input_csv, index=False)
+            all_documents_df.to_csv(input_csv, index=False)
+
+            _validate_graph_index_outputs(root, active_ids)
+            logger.info(
+                "Validated GraphRAG output lineage for project %s (%s documents)",
+                project_id,
+                len(active_ids),
+            )
 
             async with async_session_maker() as db:
                 current = await _get_project(db, project_id)
@@ -560,11 +994,43 @@ class GraphRAGWorkspace:
                         "Discarding stale GraphRAG generation %s", expected_generation
                     )
                     return
-            self.sync_to_minio(project_id, expected_generation, root)
+                if not await _source_snapshot_matches(db, project_id, docs):
+                    from app.services.graph_index_tasks import (
+                        mark_microsoft_graph_index_dirty,
+                    )
+
+                    mark_microsoft_graph_index_dirty(current)
+                    await db.commit()
+                    logger.info(
+                        "Discarding GraphRAG build for project %s because source "
+                        "documents changed during indexing",
+                        project_id,
+                    )
+                    return
+            self.sync_to_minio(
+                project_id,
+                expected_generation,
+                root,
+                replace_index_artifacts=not is_update,
+                replace_cache=compact_cache,
+            )
 
             async with async_session_maker() as db:
                 project = await _get_project(db, project_id)
                 if project.rag_generation != expected_generation:
+                    return
+                if not await _source_snapshot_matches(db, project_id, docs):
+                    from app.services.graph_index_tasks import (
+                        mark_microsoft_graph_index_dirty,
+                    )
+
+                    mark_microsoft_graph_index_dirty(project)
+                    await db.commit()
+                    logger.info(
+                        "Published GraphRAG build for project %s became stale because "
+                        "source documents changed during publication",
+                        project_id,
+                    )
                     return
                 project.graph_index_status = GraphIndexState(
                     backend="microsoft",
@@ -742,6 +1208,36 @@ async def _load_extracted_documents(
             }
         )
     return rows
+
+
+async def _source_snapshot_matches(
+    db: AsyncSession,
+    project_id: UUID,
+    expected_documents: list[dict[str, str]],
+) -> bool:
+    """Return false if uploads or deletions occurred during a manual build."""
+    from sqlalchemy import func
+
+    pending_result = await db.execute(
+        select(func.count())
+        .select_from(Document)
+        .where(
+            Document.project_id == project_id,
+            Document.status.notin_((DocumentStatus.COMPLETED, DocumentStatus.FAILED)),
+        )
+    )
+    if int(pending_result.scalar() or 0):
+        return False
+    current_documents = await _load_extracted_documents(db, project_id)
+    expected = {
+        str(document["id"]): (document["title"], document["text"])
+        for document in expected_documents
+    }
+    current = {
+        str(document["id"]): (document["title"], document["text"])
+        for document in current_documents
+    }
+    return current == expected
 
 
 _workspace: GraphRAGWorkspace | None = None

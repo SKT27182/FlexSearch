@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 
 import pytest
 
@@ -72,3 +74,16 @@ async def test_run_with_stdlib_loop_runs_coroutine_fn() -> None:
         return "coro-ok"
 
     assert _run_with_stdlib_loop(_work) == "coro-ok"
+
+
+def test_run_with_stdlib_loop_restores_process_cwd(tmp_path: Path) -> None:
+    original = Path.cwd()
+    workspace = tmp_path / "temporary-workspace"
+    workspace.mkdir()
+
+    def _work() -> Path:
+        os.chdir(workspace)
+        return Path.cwd()
+
+    assert _run_with_stdlib_loop(_work) == workspace
+    assert Path.cwd() == original

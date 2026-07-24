@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
@@ -48,6 +49,7 @@ from app.services.graph_index_tasks import schedule_graph_index_rebuild
 from app.services.graphrag_workspace import (
     GRAPHML_CANDIDATES,
     PARQUET_FILES,
+    build_graphml_bytes,
     graphrag_storage_prefix,
 )
 from app.services.project_access import user_can_access_project, user_owns_project
@@ -307,10 +309,34 @@ async def rebuild_graph_index(
     backend = graph_backend_for_project(project.rag_mode, project.rag_config)
     started = datetime.now(timezone.utc)
     if backend == "microsoft":
+        processing_result = await db.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(
+                Document.project_id == project_id,
+                Document.status.notin_(
+                    (DocumentStatus.COMPLETED, DocumentStatus.FAILED)
+                ),
+            )
+        )
+        if int(processing_result.scalar() or 0):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Wait for document extraction to finish before rebuilding "
+                    "the graph index"
+                ),
+            )
+        previous = GraphIndexState.from_db(project.graph_index_status)
         project.graph_index_status = GraphIndexState(
             backend="microsoft",
             status="indexing",
             indexing_started_at=started,
+            indexed_at=previous.indexed_at,
+            fingerprint=previous.fingerprint,
+            document_count=previous.document_count,
+            entity_count=previous.entity_count,
+            passage_count=previous.passage_count,
         ).to_db()
         await db.commit()
         schedule_graph_index_rebuild(
@@ -366,7 +392,7 @@ async def export_graph(
             detail="Graph export is only available for Microsoft GraphRAG projects",
         )
     state = GraphIndexState.from_db(project.graph_index_status)
-    if state.status != "ready":
+    if state.status not in {"ready", "stale"}:
         raise HTTPException(
             status_code=409,
             detail="Graph index is not ready for export",
@@ -376,21 +402,34 @@ async def export_graph(
     prefix = graphrag_storage_prefix(project_id, project.rag_generation)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        parquet_payloads: dict[str, bytes] = {}
         for name in PARQUET_FILES:
             key = f"{prefix}/output/{name}"
             if storage.file_exists(key):
-                zf.writestr(name, storage.download_file(key))
-        for candidate in GRAPHML_CANDIDATES:
-            key = f"{prefix}/output/{candidate}"
-            if storage.file_exists(key):
-                zf.writestr(Path(candidate).name, storage.download_file(key))
-                break
+                payload = storage.download_file(key)
+                parquet_payloads[name] = payload
+                zf.writestr(name, payload)
+        if {
+            "entities.parquet",
+            "relationships.parquet",
+        }.issubset(parquet_payloads):
+            graphml = build_graphml_bytes(
+                pd.read_parquet(io.BytesIO(parquet_payloads["entities.parquet"])),
+                pd.read_parquet(io.BytesIO(parquet_payloads["relationships.parquet"])),
+            )
+            zf.writestr("graph.graphml", graphml)
         else:
-            for key in storage.list_files(f"{prefix}/output/"):
-                if key.endswith(".graphml"):
-                    rel = key.split("/output/", 1)[-1]
-                    zf.writestr(Path(rel).name, storage.download_file(key))
+            for candidate in GRAPHML_CANDIDATES:
+                key = f"{prefix}/output/{candidate}"
+                if storage.file_exists(key):
+                    zf.writestr(Path(candidate).name, storage.download_file(key))
                     break
+            else:
+                for key in storage.list_files(f"{prefix}/output/"):
+                    if key.endswith(".graphml"):
+                        rel = key.split("/output/", 1)[-1]
+                        zf.writestr(Path(rel).name, storage.download_file(key))
+                        break
 
     buffer.seek(0)
     filename = f"graph-export-{project_id}.zip"

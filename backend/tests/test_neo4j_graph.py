@@ -7,6 +7,7 @@ import pytest
 
 from app.db.models import RagMode
 from app.rag.graph.extractor import GraphExtractor, _parse_json
+from app.rag.graph.indexer import GraphIndexer
 from app.schemas.rag_config import (
     GraphRagConfig,
     VectorRagConfig,
@@ -65,6 +66,29 @@ async def test_extractor_parses_llm_response() -> None:
     assert len(result.entities) == 2
     assert len(result.relationships) == 1
     assert result.entities[0].name == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_graph_indexer_fails_fast_on_first_extraction_error() -> None:
+    store = MagicMock()
+    indexer = GraphIndexer(store=store)
+    config = GraphRagConfig()
+
+    with patch(
+        "app.rag.graph.indexer.GraphExtractor.extract",
+        AsyncMock(side_effect=TimeoutError("LLM request timed out after 120s")),
+    ) as extract:
+        with pytest.raises(RuntimeError, match=r"passage 1/2.*timed out"):
+            await indexer.index_document(
+                "project-1",
+                "document-1",
+                "test.pdf",
+                "x" * 900,
+                config,
+            )
+
+    assert extract.await_count == 1
+    store.replace_document_graph.assert_not_called()
 
 
 def test_ensure_entity_vector_index_creates_when_missing() -> None:

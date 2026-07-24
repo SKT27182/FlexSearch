@@ -3,14 +3,15 @@ wait-for-all-documents scheduling gate."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentStatus, Project, RagMode
+from app.db.models import Document, DocumentStatus, OutboxEvent, Project, RagMode
 from app.schemas.graph_index import GraphIndexState
+from app.schemas.rag_config import GraphRagConfig
 from app.services import graph_index_tasks as tasks
 from app.services import graphrag_workspace as gw
 
@@ -35,6 +36,144 @@ def test_indexing_method_falls_back_for_unknown() -> None:
     assert gw._indexing_method_for("totally-unknown") is IndexingMethod.Standard
     assert gw._indexing_method_for("") is IndexingMethod.Standard
     assert gw._indexing_method_for(None) is IndexingMethod.Standard
+
+
+def test_mark_microsoft_graph_dirty_preserves_published_index() -> None:
+    project = Project(
+        id=uuid4(),
+        name="Dirty Graph",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft",
+            status="ready",
+            indexed_at="2026-07-24T00:00:00Z",
+            document_count=2,
+        ).to_db(),
+    )
+
+    tasks.mark_microsoft_graph_index_dirty(project)
+
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "stale"
+    assert state.indexed_at is not None
+    assert state.document_count == 2
+
+
+def test_mark_new_microsoft_graph_dirty_stays_pending() -> None:
+    project = Project(
+        id=uuid4(),
+        name="New Graph",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft", status="pending"
+        ).to_db(),
+    )
+
+    tasks.mark_microsoft_graph_index_dirty(project)
+
+    assert GraphIndexState.from_db(project.graph_index_status).status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_microsoft_upload_marks_graph_dirty_without_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import document_worker
+
+    project = Project(
+        id=uuid4(),
+        name="Manual Refresh",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft",
+            status="ready",
+            indexed_at="2026-07-24T00:00:00Z",
+        ).to_db(),
+    )
+    document = Document(
+        id=uuid4(),
+        project_id=project.id,
+        filename="new.pdf",
+        content_type="application/pdf",
+        storage_path="new/raw.pdf",
+        file_size=1,
+    )
+    db = AsyncMock()
+    complete = AsyncMock()
+    monkeypatch.setattr(document_worker, "_complete_graph_document", complete)
+
+    await document_worker._handle_graph_after_extract(
+        db,
+        document,
+        project,
+        GraphRagConfig(graph_backend="microsoft"),
+        MagicMock(),
+        "hash",
+    )
+
+    complete.assert_awaited_once_with(db, document)
+    db.commit.assert_awaited_once()
+    assert GraphIndexState.from_db(project.graph_index_status).status == "stale"
+
+
+@pytest.mark.asyncio
+async def test_microsoft_delete_marks_graph_dirty_without_rebuilding(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import document_tasks, outbox, summary_tasks
+
+    project = Project(
+        id=uuid4(),
+        name="Manual Delete Refresh",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "microsoft"},
+        graph_index_status=GraphIndexState(
+            backend="microsoft",
+            status="ready",
+            indexed_at="2026-07-24T00:00:00Z",
+            document_count=2,
+        ).to_db(),
+    )
+    document = Document(
+        id=uuid4(),
+        project_id=project.id,
+        filename="delete.pdf",
+        content_type="application/pdf",
+        storage_path="delete/raw.pdf",
+        file_size=1,
+        status=DocumentStatus.DELETING,
+    )
+    db_session.add_all([project, document])
+    await db_session.commit()
+
+    storage = MagicMock()
+    storage.file_exists.return_value = False
+    monkeypatch.setattr(outbox, "get_storage_service", lambda: storage)
+    monkeypatch.setattr(document_tasks, "cancel_document_ingest", MagicMock())
+    monkeypatch.setattr(summary_tasks, "cancel_document_summary", MagicMock())
+    event = OutboxEvent(
+        event_type="cleanup_document",
+        aggregate_type="document",
+        aggregate_id=document.id,
+        project_id=project.id,
+        payload={},
+    )
+
+    await outbox._dispatch_event(db_session, event)
+    await db_session.flush()
+
+    assert await db_session.get(Document, document.id) is None
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "stale"
+    assert state.document_count == 2
 
 
 @pytest.mark.asyncio
@@ -340,6 +479,92 @@ async def test_reconcile_stale_neo4j_leaves_alive_ingest_alone(
     assert GraphIndexState.from_db(project.graph_index_status).status == "indexing"
 
 
+@pytest.mark.asyncio
+async def test_reconcile_does_not_overwrite_ready_committed_during_inspection(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow task inspection must not replace a newer worker result."""
+    from datetime import datetime, timezone
+
+    pid = uuid4()
+
+    def _session_maker():
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return db_session
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    project = Project(
+        id=pid,
+        name="Completes During Inspect",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={"graph_backend": "neo4j"},
+        graph_index_status=GraphIndexState(
+            backend="neo4j",
+            status="indexing",
+            indexing_started_at=datetime.now(timezone.utc),
+        ).to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    async def _finishes_while_inspecting(_pid, _backend, *, db=None):
+        project.graph_index_status = GraphIndexState(
+            backend="neo4j",
+            status="ready",
+            entity_count=3,
+            passage_count=1,
+        ).to_db()
+        await db_session.commit()
+        return False
+
+    monkeypatch.setattr(tasks, "async_session_maker", _session_maker)
+    monkeypatch.setattr(tasks, "_graph_indexing_alive", _finishes_while_inspecting)
+
+    assert await tasks.reconcile_stale_graph_index(pid) is False
+    await db_session.refresh(project)
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "ready"
+    assert state.backend == "neo4j"
+
+
+@pytest.mark.asyncio
+async def test_neo4j_status_update_preserves_backend_discriminator(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import document_worker
+
+    project = Project(
+        id=uuid4(),
+        name="Neo4j Status",
+        owner_id=uuid4(),
+        rag_mode=RagMode.GRAPH,
+        rag_config={},
+        graph_index_status=GraphIndexState(backend="neo4j", status="indexing").to_db(),
+    )
+    db_session.add(project)
+    await db_session.commit()
+
+    store = MagicMock()
+    store.get_stats.return_value = MagicMock(entity_count=2, passage_count=1)
+    monkeypatch.setattr(document_worker, "get_neo4j_store", lambda: store)
+
+    await document_worker._update_graph_index_status(
+        db_session, project, status="ready"
+    )
+
+    state = GraphIndexState.from_db(project.graph_index_status)
+    assert state.status == "ready"
+    assert state.backend == "neo4j"
+
+
 def test_is_graph_rebuild_alive_false_on_terminal_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -454,6 +679,33 @@ def test_schedule_graph_rebuild_replaces_pending() -> None:
     assert kwargs["task_id"] == task_id
     assert kwargs["queue"] == "graph"
     assert kwargs["countdown"] == 1.0
+    assert kwargs["kwargs"]["force_full_rebuild"] is False
+    assert kwargs["kwargs"]["compact_cache"] is False
+
+
+def test_schedule_graph_rebuild_forwards_full_cache_compaction() -> None:
+    pid = uuid4()
+    mock_task = MagicMock()
+    mock_task.app = MagicMock()
+    mock_task.apply_async.return_value.id = "full-rebuild"
+
+    with (
+        patch("app.services.celery_tasks.rebuild_graph_index_task", mock_task),
+        patch(
+            "app.services.celery_schedule.prepare_reusable_task_id",
+            return_value="full-rebuild",
+        ),
+    ):
+        result = tasks.schedule_graph_index_rebuild(
+            pid,
+            force_full_rebuild=True,
+            compact_cache=True,
+        )
+
+    assert result == "full-rebuild"
+    kwargs = mock_task.apply_async.call_args.kwargs["kwargs"]
+    assert kwargs["force_full_rebuild"] is True
+    assert kwargs["compact_cache"] is True
 
 
 @pytest.mark.asyncio

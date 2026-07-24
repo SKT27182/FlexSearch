@@ -33,6 +33,11 @@ async def update_document_status(
     clear_error: bool = False,
 ) -> bool:
     """Persist status. Returns False if the document row was deleted concurrently."""
+    # A rollback expires ORM attributes. Capture diagnostics before commit so
+    # the concurrent-delete path never attempts an async lazy load while
+    # formatting its log message.
+    document_id = document.id
+    status_value = status.value
     document.status = status
     if processing_step is not None:
         document.processing_step = processing_step
@@ -60,11 +65,22 @@ async def update_document_status(
         await db.rollback()
         logger.info(
             "Document %s missing on status update to %s (deleted concurrently)",
-            document.id,
-            status,
+            document_id,
+            status_value,
         )
         return False
-    await publish_document_status(status_payload_from_document(document))
+    delivered = await publish_document_status(status_payload_from_document(document))
+    if status in {DocumentStatus.COMPLETED, DocumentStatus.FAILED}:
+        logger.info(
+            "Document terminal status committed document=%s project=%s status=%s "
+            "step=%s progress=%s redis_subscribers=%s",
+            document_id,
+            document.project_id,
+            status_value,
+            document.processing_step,
+            document.progress_pct,
+            delivered,
+        )
     return True
 
 

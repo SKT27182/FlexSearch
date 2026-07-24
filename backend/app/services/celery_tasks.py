@@ -97,6 +97,13 @@ def process_document_task(
                 "Could not persist FAILED status for document=%s", document_id
             )
         raise
+    logger.info(
+        "Celery ingest completed document=%s project=%s mode=%s task_id=%s",
+        document_id,
+        project_id,
+        mode,
+        self.request.id,
+    )
     return {"document_id": document_id, "status": "ok"}
 
 
@@ -140,7 +147,11 @@ async def _mark_document_ingest_failed(
     time_limit=60 * 65,
 )
 def rebuild_graph_index_task(
-    self, project_id: str, generation: int | None = None
+    self,
+    project_id: str,
+    generation: int | None = None,
+    force_full_rebuild: bool = False,
+    compact_cache: bool = False,
 ) -> dict:
     """Rebuild Microsoft GraphRAG / Neo4j project graph index."""
     from app.services.graph_index_tasks import _mark_graph_index_failed
@@ -152,9 +163,11 @@ def rebuild_graph_index_task(
 
     pid = UUID(project_id)
     logger.info(
-        "Celery graph rebuild start project=%s task_id=%s",
+        "Celery graph rebuild start project=%s task_id=%s full=%s compact_cache=%s",
         project_id,
         self.request.id,
+        force_full_rebuild,
+        compact_cache,
     )
     try:
 
@@ -170,7 +183,9 @@ def rebuild_graph_index_task(
                     return {"project_id": project_id, "status": "coalesced"}
                 await get_graphrag_workspace().build_index_for_project(
                     pid,
-                    is_update=True,
+                    is_update=not force_full_rebuild,
+                    force_full_rebuild=force_full_rebuild,
+                    compact_cache=compact_cache,
                     manage_in_flight=False,
                     generation=expected,
                 )

@@ -73,7 +73,7 @@ async def generate_multi_queries(
     response = await llm.complete(
         [{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=512,
+        # max_tokens=512,
     )
     queries = _parse_query_list(response.content or "", count=count, original=question)
     logger.info("Multi-query generated %d variants for %r", len(queries), question[:60])

@@ -9,7 +9,13 @@ export type VectorRetrievalStrategy = 'dense' | 'bm25' | 'hybrid' | 'parent_chil
 export type GraphRetrievalStrategy = 'graph_local' | 'graph_global';
 export type RetrievalStrategy = VectorRetrievalStrategy | GraphRetrievalStrategy;
 export type RerankingStrategy = 'none' | 'cross_encoder';
-export type GraphIndexStatus = 'pending' | 'indexing' | 'ready' | 'failed' | 'disabled';
+export type GraphIndexStatus =
+  | 'pending'
+  | 'indexing'
+  | 'ready'
+  | 'stale'
+  | 'failed'
+  | 'disabled';
 
 export interface PreprocessConfig {
   enabled: boolean;
@@ -166,13 +172,16 @@ export interface RetrievalOverrides {
 
 export type DocumentStatus =
   | 'uploaded'
+  | 'pending_storage'
   | 'stored'
   | 'extracting'
   | 'extracted'
   | 'chunking'
   | 'indexing'
+  | 'graph_indexing'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'deleting';
 
 export interface DocumentStatusEvent {
   document_id: string;
@@ -191,6 +200,7 @@ export const PREVIEW_STATUSES: DocumentStatus[] = [
   'extracted',
   'chunking',
   'indexing',
+  'graph_indexing',
   'completed',
 ];
 

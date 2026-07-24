@@ -158,7 +158,7 @@ async def generate_project_suggestions(
             {"role": "user", "content": "Generate the suggested questions as JSON."},
         ],
         temperature=0.6,
-        max_tokens=512,
+        # max_tokens=512,
     )
     questions = _parse_questions(response.content, limit=count)
     return (
@@ -198,6 +198,6 @@ async def generate_followup_questions(
             {"role": "user", "content": "Generate follow-up questions as JSON."},
         ],
         temperature=0.6,
-        max_tokens=400,
+        # max_tokens=400,
     )
     return _parse_questions(response.content, limit=count)

@@ -27,6 +27,20 @@ def graph_rebuild_task_id(project_id: UUID) -> str:
     return f"graph_rebuild:{project_id}"
 
 
+def mark_microsoft_graph_index_dirty(project: Project) -> None:
+    """Record source changes without starting a Microsoft GraphRAG build."""
+    previous = GraphIndexState.from_db(project.graph_index_status)
+    project.graph_index_status = GraphIndexState(
+        backend="microsoft",
+        status="stale" if previous.indexed_at else "pending",
+        indexed_at=previous.indexed_at,
+        fingerprint=previous.fingerprint,
+        document_count=previous.document_count,
+        entity_count=previous.entity_count,
+        passage_count=previous.passage_count,
+    ).to_db()
+
+
 async def _mark_graph_index_failed(project_id: UUID, error: str) -> None:
     """Ensure graph index status is not left stuck at indexing after a task crash."""
     async with async_session_maker() as db:
@@ -220,6 +234,7 @@ async def reconcile_stale_graph_index(project_id: UUID) -> bool:
         prev = GraphIndexState.from_db(project.graph_index_status)
         if prev.status != "indexing":
             return False
+        observed_started_at = prev.indexing_started_at
 
         backend = prev.backend or "microsoft"
         alive = await _graph_indexing_alive(project_id, backend, db=db)
@@ -227,21 +242,41 @@ async def reconcile_stale_graph_index(project_id: UUID) -> bool:
         if alive and not _indexing_timed_out(prev):
             return False
 
+        # Task inspection can take several seconds.  The worker may commit
+        # ``ready`` while we are waiting (especially with the local solo pool).
+        # Re-read and lock the row before writing so an old status request can
+        # never overwrite a newer terminal state.
+        current_result = await db.execute(
+            select(Project)
+            .where(Project.id == project_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        current_project = current_result.scalar_one_or_none()
+        if current_project is None:
+            return False
+        current = GraphIndexState.from_db(current_project.graph_index_status)
+        if current.status != "indexing":
+            return False
+        if current.indexing_started_at != observed_started_at:
+            # A newer indexing attempt replaced the one we inspected.
+            return False
+
         error = (
             "Indexing timed out — click Rebuild."
-            if _indexing_timed_out(prev)
+            if _indexing_timed_out(current)
             else "Indexing worker is no longer running — click Rebuild."
         )
-        project.graph_index_status = GraphIndexState(
+        current_project.graph_index_status = GraphIndexState(
             backend=backend,
             status="failed",
-            indexed_at=prev.indexed_at,
-            indexing_started_at=prev.indexing_started_at,
-            fingerprint=prev.fingerprint,
+            indexed_at=current.indexed_at,
+            indexing_started_at=current.indexing_started_at,
+            fingerprint=current.fingerprint,
             error=error,
-            document_count=prev.document_count,
-            entity_count=prev.entity_count,
-            passage_count=prev.passage_count,
+            document_count=current.document_count,
+            entity_count=current.entity_count,
+            passage_count=current.passage_count,
         ).to_db()
         await db.commit()
         logger.warning(
@@ -306,6 +341,8 @@ def schedule_graph_index_rebuild(
     *,
     debounce_seconds: float = _DEBOUNCE_SECONDS,
     generation: int | None = None,
+    force_full_rebuild: bool = False,
+    compact_cache: bool = False,
 ) -> str | None:
     """Schedule a debounced Celery graph index rebuild for a project.
 
@@ -332,15 +369,22 @@ def schedule_graph_index_rebuild(
 
     async_result = rebuild_graph_index_task.apply_async(
         args=[str(project_id)],
-        kwargs={"generation": generation},
+        kwargs={
+            "generation": generation,
+            "force_full_rebuild": force_full_rebuild,
+            "compact_cache": compact_cache,
+        },
         task_id=task_id,
         queue="graph",
         countdown=max(0.0, float(debounce_seconds)),
     )
     logger.info(
-        "Scheduled Celery graph rebuild for %s in %.0fs (task_id=%s)",
+        "Scheduled Celery graph rebuild for %s in %.0fs "
+        "(task_id=%s, full=%s, compact_cache=%s)",
         project_id,
         debounce_seconds,
         async_result.id,
+        force_full_rebuild,
+        compact_cache,
     )
     return async_result.id

@@ -187,6 +187,9 @@ async def _dispatch_event(db: AsyncSession, event: OutboxEvent) -> None:
         from app.services.document_tasks import cancel_document_ingest
         from app.services.summary_tasks import cancel_document_summary
 
+        config = parse_rag_config(project.rag_mode, project.rag_config)
+        is_microsoft_graph = getattr(config, "graph_backend", None) == "microsoft"
+
         def cleanup() -> None:
             storage = get_storage_service()
             for path in (
@@ -199,17 +202,23 @@ async def _dispatch_event(db: AsyncSession, event: OutboxEvent) -> None:
                     storage.delete_file(path)
             cancel_document_ingest(document.id)
             cancel_document_summary(document.id)
-            config = parse_rag_config(project.rag_mode, project.rag_config)
-            create_pipeline(
-                config,
-                rag_mode=project.rag_mode,
-                rag_generation=project.rag_generation,
-            ).delete_document_data(
-                str(document.id), project_id=str(document.project_id)
-            )
+            if not is_microsoft_graph:
+                create_pipeline(
+                    config,
+                    rag_mode=project.rag_mode,
+                    rag_generation=project.rag_generation,
+                ).delete_document_data(
+                    str(document.id), project_id=str(document.project_id)
+                )
 
         await asyncio.to_thread(cleanup)
         await db.delete(document)
+        if is_microsoft_graph:
+            from app.services.graph_index_tasks import (
+                mark_microsoft_graph_index_dirty,
+            )
+
+            mark_microsoft_graph_index_dirty(project)
         return
     if event.event_type == "cleanup_previous_index":
         result = await db.execute(select(Project).where(Project.id == event.project_id))

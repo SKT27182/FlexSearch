@@ -23,21 +23,24 @@ def project_channel(project_id: UUID | str) -> str:
     return PROJECT_CHANNEL.format(project_id=project_id)
 
 
-async def publish_document_status(payload: dict[str, Any]) -> None:
-    """Publish status to document and project channels."""
+async def publish_document_status(payload: dict[str, Any]) -> int:
+    """Publish status and return the number of Redis pub/sub subscribers reached."""
     client = await get_redis()
     if client is None:
-        return
+        return 0
     message = json.dumps(payload, default=str)
     doc_id = payload.get("document_id")
     proj_id = payload.get("project_id")
     try:
+        delivered = 0
         if doc_id:
-            await client.publish(document_channel(doc_id), message)
+            delivered += int(await client.publish(document_channel(doc_id), message))
         if proj_id:
-            await client.publish(project_channel(proj_id), message)
+            delivered += int(await client.publish(project_channel(proj_id), message))
+        return delivered
     except Exception as exc:
         logger.warning("Failed to publish document status: %s", exc)
+        return 0
 
 
 def status_payload_from_document(document: Any) -> dict[str, Any]:

@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TypeVar
 
 T = TypeVar("T")
 
 # GraphRAG indexing is CPU/IO heavy; keep concurrency low.
 _graphrag_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="graphrag")
+# ``graphrag.config.load_config`` changes the process-wide cwd to the workspace.
+# Serialize those calls and always return to the directory captured at process
+# startup before the temporary workspace is removed.
+_graphrag_cwd_lock = threading.Lock()
+_process_working_dir = Path.cwd()
 
 
 def _stdlib_event_loop() -> asyncio.AbstractEventLoop:
@@ -19,17 +27,20 @@ def _stdlib_event_loop() -> asyncio.AbstractEventLoop:
 
 
 def _run_with_stdlib_loop(fn: Callable[[], T]) -> T:
-    """Run sync or async GraphRAG work on a fresh stdlib loop in a worker thread."""
-    loop = _stdlib_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = fn()
-        if asyncio.iscoroutine(result):
-            return loop.run_until_complete(result)
-        return result
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+    """Run GraphRAG on a stdlib loop without leaking its process-wide cwd."""
+    with _graphrag_cwd_lock:
+        os.chdir(_process_working_dir)
+        loop = _stdlib_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = fn()
+            if asyncio.iscoroutine(result):
+                return loop.run_until_complete(result)
+            return result
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+            os.chdir(_process_working_dir)
 
 
 async def run_in_std_event_loop(

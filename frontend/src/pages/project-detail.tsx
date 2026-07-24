@@ -42,11 +42,13 @@ import { defaultRagConfigForMode, projectModeFromRag, projectModeToRagMode } fro
 
 const PROCESSING_STATUSES = new Set([
   'uploaded',
+  'pending_storage',
   'stored',
   'extracting',
   'extracted',
   'chunking',
   'indexing',
+  'graph_indexing',
 ]);
 
 type MainTab = 'chat' | 'search';
@@ -151,10 +153,13 @@ export function ProjectDetailPage() {
 
   const shouldPollGraphIndex = useMemo(() => {
     if (!project || !isGraphMode(project.rag_mode)) return false;
-    if (getGraphBackend(project.rag_config) !== 'microsoft') return false;
+    // Neo4j updates graph_index_status during each document ingest just like
+    // Microsoft GraphRAG. Poll while a document is active even when the last
+    // project snapshot still says "ready" from an earlier document.
+    if (hasProcessing) return true;
     const status = project.graph_index_status?.status;
     return status === 'pending' || status === 'indexing';
-  }, [project]);
+  }, [project, hasProcessing]);
 
   useEffect(() => {
     if (!id || !shouldPollGraphIndex) return;
@@ -320,7 +325,7 @@ export function ProjectDetailPage() {
   const graphReady =
     !isGraphProject ||
     (isMicrosoftGraph
-      ? graphStatus?.status === 'ready'
+      ? graphStatus?.status === 'ready' || graphStatus?.status === 'stale'
       : graphStatus?.status === 'ready' ||
         (graphStatus?.entity_count ?? 0) > 0 ||
         (graphStatus?.passage_count ?? 0) > 0);
@@ -365,7 +370,8 @@ export function ProjectDetailPage() {
                 · graph index:{' '}
                 <span
                   className={cn(
-                    graphReady && 'text-emerald-600',
+                    graphStatus?.status === 'ready' && 'text-emerald-600',
+                    graphStatus?.status === 'stale' && 'text-amber-600',
                     graphStatus?.status === 'failed' && 'text-destructive'
                   )}
                 >
@@ -381,6 +387,12 @@ export function ProjectDetailPage() {
               </>
             )}
           </p>
+          {isMicrosoftGraph && graphStatus?.status === 'stale' && (
+            <p className="text-xs text-amber-600 mt-1">
+              Source documents changed. Queries still use the last published graph until you
+              click Rebuild graph index.
+            </p>
+          )}
         </div>
         <Button variant="outline" onClick={() => setShowSettings(!showSettings)}>
           <Settings className="h-4 w-4 mr-2" />

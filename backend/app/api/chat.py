@@ -82,7 +82,7 @@ def _ensure_graph_ready(project: Project) -> None:
     if rag_mode != RagMode.GRAPH:
         return
     graph_state = GraphIndexState.from_db(project.graph_index_status)
-    if graph_state.status != "ready":
+    if graph_state.status not in {"ready", "stale"}:
         raise HTTPException(
             status_code=409,
             detail="Graph index is not ready. Wait for indexing to complete.",
