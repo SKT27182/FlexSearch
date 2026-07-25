@@ -147,5 +147,18 @@ jobs:
           exit-code: "0"
       - name: Assert local secrets and development artifacts are absent
         run: |
-          test -z "$(docker run --rm flexsearch-api:ci sh -c 'find /app \( -name ".env" -o -name ".env.*" -o -name "*.db" -o -name ".git" -o -name "tests" -o -name "*.log" \) -print')"
-          test -z "$(docker run --rm flexsearch-worker:ci sh -c 'find /app \( -name ".env" -o -name ".env.*" -o -name "*.db" -o -name ".git" -o -name "tests" -o -name "*.log" \) -print')"
+          # Only check app-owned paths. Do not search .venv — third-party packages
+          # ship directories named "tests" (networkx, sympy, …) which are not our suite.
+          assert_clean() {
+            docker run --rm "$1" sh -c '
+              set -e
+              for p in /app/.env /app/.git /app/tests; do
+                if [ -e "$p" ]; then echo "unexpected: $p"; exit 1; fi
+              done
+              found="$(find /app \( -path /app/.venv -o -path /app/.venv/\* \) -prune -o \
+                \( -name ".env.*" -o -name "*.db" -o -name "*.log" \) -print)"
+              if [ -n "$found" ]; then echo "$found"; exit 1; fi
+            '
+          }
+          assert_clean flexsearch-api:ci
+          assert_clean flexsearch-worker:ci
