@@ -6,7 +6,7 @@ sentence-transformers backend used by EmbeddingService.
 
 from __future__ import annotations
 
-from sentence_transformers import SentenceTransformer
+from typing import Any
 
 from app.utils.logger import create_logger
 
@@ -17,18 +17,21 @@ class LocalEmbeddingBackend:
     """Local embedding backend using sentence-transformers."""
 
     def __init__(self, model_name: str) -> None:
-        self._model: SentenceTransformer | None = None
+        self._model: Any | None = None
         self._model_name = model_name
 
-    def _get_model(self) -> SentenceTransformer:
+    def _get_model(self) -> Any:
         if self._model is None:
+            # Lazy import: sentence-transformers pulls transformers at import time.
+            # Keep that off the FastAPI/pytest collection path.
+            from sentence_transformers import SentenceTransformer
+            from huggingface_hub.utils import disable_progress_bars
+            from transformers.utils.logging import disable_progress_bar
+
             logger.info("Loading embedding model: %s", self._model_name)
             # Model loaders otherwise write progress bars straight to stderr,
             # bypassing the application logger and looking like warnings under
             # Celery. Normal load/failure messages still use logging.
-            from huggingface_hub.utils import disable_progress_bars
-            from transformers.utils.logging import disable_progress_bar
-
             disable_progress_bars()
             disable_progress_bar()
             try:

@@ -121,21 +121,24 @@ jobs:
       - run: docker build -t flexsearch-api:ci backend
       - run: docker build -t flexsearch-worker:ci -f backend/Dockerfile.worker backend
       - run: docker build -t flexsearch-frontend:ci frontend
-      - uses: aquasecurity/trivy-action@v0.33.1
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: flexsearch-api:ci
+          version: v0.72.0
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@v0.33.1
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: flexsearch-worker:ci
+          version: v0.72.0
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@v0.33.1
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: flexsearch-frontend:ci
+          version: v0.72.0
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
