@@ -14,6 +14,8 @@ jobs:
     env:
       APP_ENV: test
       # Required by Settings(); tests use SQLite and do not need real services.
+      # JWT_SECRET is generated in a step so gitleaks does not flag a committed value.
+      POSTGRES_HOST: 127.0.0.1
       POSTGRES_USER: test
       POSTGRES_PASSWORD: test-password
       MINIO_ACCESS_KEY: test-access-key
@@ -21,9 +23,10 @@ jobs:
       REDIS_PASSWORD: test-redis-password
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: test-neo4j-password
-      JWT_SECRET: test-jwt-secret-at-least-32-characters-long
     steps:
       - uses: actions/checkout@v4
+      - name: Generate CI JWT secret
+        run: echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -31,9 +34,9 @@ jobs:
         working-directory: backend
       - run: uv run ruff check app tests alembic
         working-directory: backend
-      - run: uvx bandit -r app -ll
+      - run: uvx --from 'bandit[toml]' bandit -c pyproject.toml -r app -ll
         working-directory: backend
-      - run: uv run pytest -q
+      - run: uv run pytest -q --tb=short
         working-directory: backend
       - run: uv export --locked --no-dev --format requirements-txt --output-file /tmp/requirements.txt
         working-directory: backend
@@ -52,6 +55,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: cp .env.example .env
         working-directory: frontend
       - run: pnpm lint
         working-directory: frontend
@@ -77,8 +82,9 @@ jobs:
           --health-retries 10
     env:
       APP_ENV: test
-      POSTGRES_URL: postgresql+asyncpg://flexsearch:ci-only-password@localhost:5432/flexsearch
-      # Required by Settings() even when POSTGRES_URL is set.
+      # Prefer 127.0.0.1 — localhost can resolve to ::1 on some runners.
+      POSTGRES_URL: postgresql+asyncpg://flexsearch:ci-only-password@127.0.0.1:5432/flexsearch
+      POSTGRES_HOST: 127.0.0.1
       POSTGRES_USER: flexsearch
       POSTGRES_PASSWORD: ci-only-password
       MINIO_ACCESS_KEY: test-access-key
@@ -86,16 +92,22 @@ jobs:
       REDIS_PASSWORD: test-redis-password
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: test-neo4j-password
-      JWT_SECRET: test-jwt-secret-at-least-32-characters-long
     steps:
       - uses: actions/checkout@v4
+      - name: Generate CI JWT secret
+        run: echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked
         working-directory: backend
       - run: uv run alembic upgrade head
         working-directory: backend
-      - run: uv run alembic current | grep 009
+      - name: Assert alembic_version matches head
         working-directory: backend
+        run: |
+          expected="$(uv run alembic heads | awk '{print $1}')"
+          actual="$(uv run alembic current | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
       - run: uv run alembic check
         working-directory: backend
 

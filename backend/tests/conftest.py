@@ -2,7 +2,6 @@
 FlexSearch Backend - Test Fixtures
 """
 
-import asyncio
 from typing import AsyncGenerator
 
 import pytest
@@ -41,14 +40,6 @@ def isolate_process_state(monkeypatch):
     yield
     settings.rate_limit_enabled = original_rate_limit
     _memory.clear()
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="function")

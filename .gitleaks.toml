@@ -1,0 +1,21 @@
+# Gitleaks config for FlexSearch.
+# CI dummy credentials are generated at runtime or assembled in tests; keep
+# allowlists narrow so real secrets are still blocked.
+
+title = "FlexSearch"
+
+[allowlist]
+description = "Test fixtures, docs examples, and retired CI placeholder JWT"
+paths = [
+  '''backend/tests/''',
+  '''backend/\.env\.example''',
+  '''frontend/\.env\.example''',
+  '''docs/''',
+  '''backend/docs/''',
+  '''backend/README\.md''',
+  '''README\.md''',
+]
+regexes = [
+  # Placeholder previously committed in CI workflow; replaced by openssl at runtime.
+  '''test-jwt-secret-at-least-32-characters-long''',
+]
