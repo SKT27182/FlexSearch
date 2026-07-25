@@ -672,6 +672,8 @@ class GraphRAGWorkspace:
         if "graphml: false" in content:
             content = content.replace("graphml: false", "graphml: true")
         settings_path.write_text(content, encoding="utf-8")
+        # Ensure ${GRAPHRAG_*} placeholders resolve when callers load_config().
+        _set_graphrag_runtime_env()
 
     def bootstrap_workspace(self, root: Path, *, force: bool = False) -> None:
         """Sync bootstrap for tests; production code should use materialize()."""

@@ -11,6 +11,17 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      # Required by Settings(); tests use SQLite and do not need real services.
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test-password
+      MINIO_ACCESS_KEY: test-access-key
+      MINIO_SECRET_KEY: test-secret-key
+      REDIS_PASSWORD: test-redis-password
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: test-neo4j-password
+      JWT_SECRET: test-jwt-secret-at-least-32-characters-long
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -67,6 +78,15 @@ jobs:
     env:
       APP_ENV: test
       POSTGRES_URL: postgresql+asyncpg://flexsearch:ci-only-password@localhost:5432/flexsearch
+      # Required by Settings() even when POSTGRES_URL is set.
+      POSTGRES_USER: flexsearch
+      POSTGRES_PASSWORD: ci-only-password
+      MINIO_ACCESS_KEY: test-access-key
+      MINIO_SECRET_KEY: test-secret-key
+      REDIS_PASSWORD: test-redis-password
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: test-neo4j-password
+      JWT_SECRET: test-jwt-secret-at-least-32-characters-long
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -89,19 +109,19 @@ jobs:
       - run: docker build -t flexsearch-api:ci backend
       - run: docker build -t flexsearch-worker:ci -f backend/Dockerfile.worker backend
       - run: docker build -t flexsearch-frontend:ci frontend
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: flexsearch-api:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: flexsearch-worker:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: flexsearch-frontend:ci
           severity: HIGH,CRITICAL

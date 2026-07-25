@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router';
 import { Zap } from 'lucide-react';
 import { Button, Input } from '@/components/ui';
 import { AuthLoginLayout, AuthLoginCardHeader, CardContent, CardFooter } from '@/components/AuthLoginLayout';

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { Navigate, Outlet, useLocation } from 'react-router'
 import { Menu, Loader2 } from 'lucide-react'
 import { useAuthStore, useProjectStore } from '@/stores'
 import { cn } from '@/lib/utils'

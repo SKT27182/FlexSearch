@@ -148,6 +148,10 @@ def test_bootstrap_workspace_splits_llm_and_embedding_models(
         "app.services.graphrag_workspace.settings.graphrag_embedding_api_base",
         "",
     )
+    # load_config expands ${GRAPHRAG_*} from the process env (not Settings).
+    monkeypatch.setenv("GRAPHRAG_API_KEY", "test-llm-api-key")
+    monkeypatch.setenv("GRAPHRAG_EMBEDDING_API_KEY", "test-embedding-api-key")
+    monkeypatch.setenv("GRAPHRAG_EMBEDDING_API_BASE", "http://embed-proxy:4000")
 
     root = tmp_path / "workspace"
     GraphRAGWorkspace(storage=object()).bootstrap_workspace(root, force=True)
@@ -193,6 +197,11 @@ def test_bootstrap_workspace_writes_graphrag3_settings(
     monkeypatch.setattr(
         "app.services.graphrag_workspace.settings.llm_api_base",
         "",
+    )
+    monkeypatch.setenv("GRAPHRAG_API_KEY", "test-key")
+    monkeypatch.setenv("GRAPHRAG_EMBEDDING_API_KEY", "embed-key")
+    monkeypatch.setenv(
+        "GRAPHRAG_EMBEDDING_API_BASE", "http://embed-proxy:4000/v1"
     )
 
     root = tmp_path / "workspace"

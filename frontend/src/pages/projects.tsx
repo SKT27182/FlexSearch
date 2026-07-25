@@ -7,7 +7,7 @@ import {
   projectModeLabel,
   projectModeToRagMode,
 } from '@/lib/rag-types';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { FolderOpen, Plus, Trash2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
 import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, buttonVariants } from '@/components/ui';

@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { FolderOpen, FileText, Activity, Plus } from 'lucide-react';
 import { useAuthStore, useProjectStore } from '@/stores';
 import { Card, CardHeader, CardTitle, CardContent, buttonVariants } from '@/components/ui';
