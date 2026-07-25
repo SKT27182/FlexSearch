@@ -40,7 +40,7 @@ jobs:
         working-directory: backend
       - run: uv export --locked --no-dev --format requirements-txt --output-file /tmp/requirements.txt
         working-directory: backend
-      - run: uvx --python 3.11 pip-audit -r /tmp/requirements.txt
+      - run: uvx --python 3.11 pip-audit --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/requirements.txt
 
   frontend:
     runs-on: ubuntu-latest
