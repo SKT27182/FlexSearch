@@ -57,6 +57,7 @@ dependencies = [
     "setuptools>=83.0.0",
     "torch>=2.13.0",
     "urllib3>=2.7.0",
+    "torchvision>=0.28.0",
 ]
 
 [dependency-groups]
